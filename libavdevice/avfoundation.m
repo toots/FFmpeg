@@ -88,6 +88,7 @@ typedef struct
     int64_t         first_pts;
     int64_t         first_audio_pts;
     pthread_mutex_t frame_lock;
+    pthread_cond_t  frame_condition;
     id              avf_delegate;
     id              avf_audio_delegate;
 
@@ -137,8 +138,14 @@ static void lock_frames(AVFContext* ctx)
     pthread_mutex_lock(&ctx->frame_lock);
 }
 
+static void wait_frames(AVFContext* ctx)
+{
+    pthread_cond_wait(&ctx->frame_condition, &ctx->frame_lock);
+}
+
 static void unlock_frames(AVFContext* ctx)
 {
+    pthread_cond_signal(&ctx->frame_condition);
     pthread_mutex_unlock(&ctx->frame_lock);
 }
 
@@ -221,8 +228,8 @@ static void unlock_frames(AVFContext* ctx)
 {
     lock_frames(_context);
 
-    if (_context->current_frame != nil) {
-        CFRelease(_context->current_frame);
+    while (_context->current_frame != nil) {
+        wait_frames(_context);
     }
 
     _context->current_frame = (CMSampleBufferRef)CFRetain(videoFrame);
@@ -265,8 +272,8 @@ static void unlock_frames(AVFContext* ctx)
 {
     lock_frames(_context);
 
-    if (_context->current_audio_frame != nil) {
-        CFRelease(_context->current_audio_frame);
+    while (_context->current_audio_frame != nil) {
+        wait_frames(_context);
     }
 
     _context->current_audio_frame = (CMSampleBufferRef)CFRetain(audioFrame);
@@ -300,6 +307,7 @@ static void destroy_context(AVFContext* ctx)
     }
 
     pthread_mutex_destroy(&ctx->frame_lock);
+    pthread_cond_destroy(&ctx->frame_condition);
 
     if (ctx->current_frame) {
         CFRelease(ctx->current_frame);
@@ -695,11 +703,17 @@ static int get_audio_config(AVFormatContext *s)
     const AudioStreamBasicDescription *input_format = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
 
     if (!input_format) {
+        CFRelease(ctx->current_audio_frame);
+        ctx->current_audio_frame = nil;
+        unlock_frames(ctx);
         av_log(s, AV_LOG_ERROR, "audio format not available\n");
         return 1;
     }
 
     if (input_format->mFormatID != kAudioFormatLinearPCM) {
+        CFRelease(ctx->current_audio_frame);
+        ctx->current_audio_frame = nil;
+        unlock_frames(ctx);
         av_log(s, AV_LOG_ERROR, "only PCM audio format are supported at the moment\n");
         return 1;
     }
@@ -777,6 +791,9 @@ static int get_audio_config(AVFormatContext *s)
     if (must_convert) {
         OSStatus ret = AudioConverterNew(input_format, &output_format, &ctx->audio_converter);
         if (ret != noErr) {
+            CFRelease(ctx->current_audio_frame);
+            ctx->current_audio_frame = nil;
+            unlock_frames(ctx);
             av_log(s, AV_LOG_ERROR, "Error while allocating audio converter\n");
             return 1;
         }
@@ -784,7 +801,6 @@ static int get_audio_config(AVFormatContext *s)
 
     CFRelease(ctx->current_audio_frame);
     ctx->current_audio_frame = nil;
-
     unlock_frames(ctx);
 
     return 0;
@@ -806,6 +822,7 @@ static int avf_read_header(AVFormatContext *s)
     ctx->first_audio_pts    = av_gettime();
 
     pthread_mutex_init(&ctx->frame_lock, NULL);
+    pthread_cond_init(&ctx->frame_condition, NULL);
 
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     CGGetActiveDisplayList(0, NULL, &num_screens);
@@ -1103,10 +1120,16 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             } else if (block_buffer != nil) {
                 length = (int)CMBlockBufferGetDataLength(block_buffer);
             } else  {
+                CFRelease(ctx->current_frame);
+                ctx->current_frame = nil;
+                unlock_frames(ctx);
                 return AVERROR(EINVAL);
             }
 
             if (av_new_packet(pkt, length) < 0) {
+                CFRelease(ctx->current_frame);
+                ctx->current_frame = nil;
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
@@ -1133,8 +1156,12 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             CFRelease(ctx->current_frame);
             ctx->current_frame = nil;
 
-            if (status < 0)
+            if (status < 0) {
+                CFRelease(ctx->current_frame);
+                ctx->current_frame = nil;
+                unlock_frames(ctx);
                 return status;
+            }
         } else if (ctx->current_audio_frame != nil) {
             OSStatus ret;
             CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(ctx->current_audio_frame);
@@ -1147,10 +1174,16 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             UInt32 size = sizeof(output_size);
             ret = AudioConverterGetProperty(ctx->audio_converter, kAudioConverterPropertyCalculateOutputBufferSize, &size, &output_size);
             if (ret != noErr) {
+                CFRelease(ctx->current_audio_frame);
+                ctx->current_audio_frame = nil;
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
             if (av_new_packet(pkt, output_size) < 0) {
+                CFRelease(ctx->current_audio_frame);
+                ctx->current_audio_frame = nil;
+                unlock_frames(ctx);
                 return AVERROR(EIO);
             }
 
@@ -1167,6 +1200,9 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
                     if (ret != kCMBlockBufferNoErr) {
                         av_free(input_buffer);
+                        CFRelease(ctx->current_audio_frame);
+                        ctx->current_audio_frame = nil;
+                        unlock_frames(ctx);
                         return AVERROR(EIO);
                     }
                 }
@@ -1184,6 +1220,9 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 av_free(input_buffer);
 
                 if (ret != noErr) {
+                    CFRelease(ctx->current_audio_frame);
+                    ctx->current_audio_frame = nil;
+                    unlock_frames(ctx);
                     return AVERROR(EIO);
                 }
 
@@ -1191,6 +1230,9 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             } else {
                  ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
                  if (ret != kCMBlockBufferNoErr) {
+                     CFRelease(ctx->current_audio_frame);
+                     ctx->current_audio_frame = nil;
+                     unlock_frames(ctx);
                      return AVERROR(EIO);
                  }
             }
@@ -1208,6 +1250,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             CFRelease(ctx->current_audio_frame);
             ctx->current_audio_frame = nil;
+            unlock_frames(ctx);
         } else {
             pkt->data = NULL;
             unlock_frames(ctx);
@@ -1217,8 +1260,6 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 return AVERROR(EAGAIN);
             }
         }
-
-        unlock_frames(ctx);
     } while (!pkt->data);
 
     return 0;
