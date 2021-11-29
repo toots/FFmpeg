@@ -93,6 +93,11 @@ typedef struct
     AVRational      framerate;
     int             width, height;
 
+    int             channels;
+    int             big_endian;
+    int             sample_rate;
+    enum AVSampleFormat sample_format;
+
     int             capture_cursor;
     int             capture_mouse_clicks;
     int             capture_raw_data;
@@ -110,17 +115,6 @@ typedef struct
     char            *audio_filename;
 
     int             num_video_devices;
-
-    int             audio_channels;
-    int             audio_bits_per_sample;
-    int             audio_float;
-    int             audio_be;
-    int             audio_signed_integer;
-    int             audio_packed;
-    int             audio_non_interleaved;
-
-    int32_t         *audio_buffer;
-    int             audio_buffer_size;
 
     enum AVPixelFormat pixel_format;
 
@@ -298,14 +292,6 @@ static void destroy_context(AVFContext* ctx)
     ctx->audio_output    = NULL;
     ctx->avf_delegate    = NULL;
     ctx->avf_audio_delegate = NULL;
-
-    av_freep(&ctx->audio_buffer);
-
-    pthread_mutex_destroy(&ctx->frame_lock);
-
-    if (ctx->current_frame) {
-        CFRelease(ctx->current_frame);
-    }
 }
 
 static void parse_device_name(AVFormatContext *s)
@@ -671,88 +657,62 @@ static int get_video_config(AVFormatContext *s)
 static int get_audio_config(AVFormatContext *s)
 {
     AVFContext *ctx = (AVFContext*)s->priv_data;
-    CMFormatDescriptionRef format_desc;
-    AVStream* stream = avformat_new_stream(s, NULL);
+    AVStream* stream;
+    int bits_per_sample, is_float;
 
+    enum AVCodecID codec_id = av_get_pcm_codec(ctx->sample_format, ctx->big_endian);
+
+    if (codec_id == AV_CODEC_ID_NONE) {
+       av_log(ctx, AV_LOG_ERROR, "Error: invalid sample format!\n");
+       return AVERROR(EINVAL);
+    }
+
+    switch (ctx->sample_format) {
+        case AV_SAMPLE_FMT_S16:
+            bits_per_sample = 16;
+            is_float = 0;
+            break;
+        case AV_SAMPLE_FMT_S32:
+            bits_per_sample = 32;
+            is_float = 0;
+            break;
+        case AV_SAMPLE_FMT_FLT:
+            bits_per_sample = 32;
+            is_float = 1;
+            break;
+        default:
+            av_log(ctx, AV_LOG_ERROR, "Error: invalid sample format!\n");
+            unlock_frames(ctx);
+            return AVERROR(EINVAL);
+    }
+
+    [ctx->audio_output setAudioSettings:@{
+        AVFormatIDKey:               @(kAudioFormatLinearPCM),
+        AVLinearPCMBitDepthKey:      @(bits_per_sample),
+        AVLinearPCMIsFloatKey:       @(is_float),
+        AVLinearPCMIsBigEndianKey:   @(ctx->big_endian),
+        AVNumberOfChannelsKey:       @(ctx->channels),
+        AVLinearPCMIsNonInterleaved: @NO,
+        AVSampleRateKey:             @(ctx->sample_rate)
+    }];
+
+    stream = avformat_new_stream(s, NULL);
     if (!stream) {
-        return 1;
+        unlock_frames(ctx);
+        return -1;
     }
-
-    // Take stream info from the first frame.
-    while (ctx->audio_frames_captured < 1) {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, YES);
-    }
-
-    lock_frames(ctx);
-
-    ctx->audio_stream_index = stream->index;
 
     avpriv_set_pts_info(stream, 64, 1, avf_time_base);
 
-    format_desc = CMSampleBufferGetFormatDescription(ctx->current_audio_frame);
-    const AudioStreamBasicDescription *basic_desc = CMAudioFormatDescriptionGetStreamBasicDescription(format_desc);
-
-    if (!basic_desc) {
-        unlock_frames(ctx);
-        av_log(s, AV_LOG_ERROR, "audio format not available\n");
-        return 1;
-    }
-
     stream->codecpar->codec_type     = AVMEDIA_TYPE_AUDIO;
-    stream->codecpar->sample_rate    = basic_desc->mSampleRate;
-    stream->codecpar->channels       = basic_desc->mChannelsPerFrame;
+    stream->codecpar->sample_rate    = ctx->sample_rate;
+    stream->codecpar->channels       = ctx->channels;
     stream->codecpar->channel_layout = av_get_default_channel_layout(stream->codecpar->channels);
+    stream->codecpar->codec_id       = codec_id;
 
-    ctx->audio_channels        = basic_desc->mChannelsPerFrame;
-    ctx->audio_bits_per_sample = basic_desc->mBitsPerChannel;
-    ctx->audio_float           = basic_desc->mFormatFlags & kAudioFormatFlagIsFloat;
-    ctx->audio_be              = basic_desc->mFormatFlags & kAudioFormatFlagIsBigEndian;
-    ctx->audio_signed_integer  = basic_desc->mFormatFlags & kAudioFormatFlagIsSignedInteger;
-    ctx->audio_packed          = basic_desc->mFormatFlags & kAudioFormatFlagIsPacked;
-    ctx->audio_non_interleaved = basic_desc->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
-
-    if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
-        ctx->audio_float &&
-        ctx->audio_bits_per_sample == 32 &&
-        ctx->audio_packed) {
-        stream->codecpar->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_F32BE : AV_CODEC_ID_PCM_F32LE;
-    } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
-        ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 16 &&
-        ctx->audio_packed) {
-        stream->codecpar->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S16BE : AV_CODEC_ID_PCM_S16LE;
-    } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
-        ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 24 &&
-        ctx->audio_packed) {
-        stream->codecpar->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S24BE : AV_CODEC_ID_PCM_S24LE;
-    } else if (basic_desc->mFormatID == kAudioFormatLinearPCM &&
-        ctx->audio_signed_integer &&
-        ctx->audio_bits_per_sample == 32 &&
-        ctx->audio_packed) {
-        stream->codecpar->codec_id = ctx->audio_be ? AV_CODEC_ID_PCM_S32BE : AV_CODEC_ID_PCM_S32LE;
-    } else {
-        unlock_frames(ctx);
-        av_log(s, AV_LOG_ERROR, "audio format is not supported\n");
-        return 1;
-    }
-
-    if (ctx->audio_non_interleaved) {
-        CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(ctx->current_audio_frame);
-        ctx->audio_buffer_size        = CMBlockBufferGetDataLength(block_buffer);
-        ctx->audio_buffer             = av_malloc(ctx->audio_buffer_size);
-        if (!ctx->audio_buffer) {
-            unlock_frames(ctx);
-            av_log(s, AV_LOG_ERROR, "error allocating audio buffer\n");
-            return 1;
-        }
-    }
-
-    CFRelease(ctx->current_audio_frame);
-    ctx->current_audio_frame = nil;
+    ctx->audio_stream_index = stream->index;
 
     unlock_frames(ctx);
-
     return 0;
 }
 
@@ -975,6 +935,7 @@ static int avf_read_header(AVFormatContext *s)
         goto fail;
     }
     if (audio_device && add_audio_device(s, audio_device)) {
+        goto fail;
     }
 
     [ctx->capture_session startRunning];
@@ -1048,6 +1009,7 @@ static int copy_cvpixelbuffer(AVFormatContext *s,
 
 static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
+    OSStatus ret;
     AVFContext* ctx = (AVFContext*)s->priv_data;
 
     do {
@@ -1091,7 +1053,7 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
                 status = copy_cvpixelbuffer(s, image_buffer, pkt);
             } else {
                 status = 0;
-                OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
+                ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
                 if (ret != kCMBlockBufferNoErr) {
                     status = AVERROR(EIO);
                 }
@@ -1105,19 +1067,17 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             }
         } else if (ctx->current_audio_frame != nil) {
             CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(ctx->current_audio_frame);
-            int block_buffer_size         = CMBlockBufferGetDataLength(block_buffer);
 
-            if (!block_buffer || !block_buffer_size) {
+            size_t buffer_size = CMBlockBufferGetDataLength(block_buffer);
+
+            int status = av_new_packet(pkt, buffer_size);
+            if (status < 0) {
                 unlock_frames(ctx);
-                return AVERROR(EIO);
+                return status;
             }
 
-            if (ctx->audio_non_interleaved && block_buffer_size > ctx->audio_buffer_size) {
-                unlock_frames(ctx);
-                return AVERROR_BUFFER_TOO_SMALL;
-            }
-
-            if (av_new_packet(pkt, block_buffer_size) < 0) {
+            ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
+            if (ret != kCMBlockBufferNoErr) {
                 unlock_frames(ctx);
                 return AVERROR(EIO);
             }
@@ -1133,54 +1093,10 @@ static int avf_read_packet(AVFormatContext *s, AVPacket *pkt)
             pkt->stream_index  = ctx->audio_stream_index;
             pkt->flags        |= AV_PKT_FLAG_KEY;
 
-            if (ctx->audio_non_interleaved) {
-                int sample, c, shift, num_samples;
-
-                OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, ctx->audio_buffer);
-                if (ret != kCMBlockBufferNoErr) {
-                    unlock_frames(ctx);
-                    return AVERROR(EIO);
-                }
-
-                num_samples = pkt->size / (ctx->audio_channels * (ctx->audio_bits_per_sample >> 3));
-
-                // transform decoded frame into output format
-                #define INTERLEAVE_OUTPUT(bps)                                         \
-                {                                                                      \
-                    int##bps##_t **src;                                                \
-                    int##bps##_t *dest;                                                \
-                    src = av_malloc(ctx->audio_channels * sizeof(int##bps##_t*));      \
-                    if (!src) {                                                        \
-                        unlock_frames(ctx);                                            \
-                        return AVERROR(EIO);                                           \
-                    }                                                                  \
-                                                                                       \
-                    for (c = 0; c < ctx->audio_channels; c++) {                        \
-                        src[c] = ((int##bps##_t*)ctx->audio_buffer) + c * num_samples; \
-                    }                                                                  \
-                    dest  = (int##bps##_t*)pkt->data;                                  \
-                    shift = bps - ctx->audio_bits_per_sample;                          \
-                    for (sample = 0; sample < num_samples; sample++)                   \
-                        for (c = 0; c < ctx->audio_channels; c++)                      \
-                            *dest++ = src[c][sample] << shift;                         \
-                    av_freep(&src);                                                    \
-                }
-
-                if (ctx->audio_bits_per_sample <= 16) {
-                    INTERLEAVE_OUTPUT(16)
-                } else {
-                    INTERLEAVE_OUTPUT(32)
-                }
-            } else {
-                OSStatus ret = CMBlockBufferCopyDataBytes(block_buffer, 0, pkt->size, pkt->data);
-                if (ret != kCMBlockBufferNoErr) {
-                    unlock_frames(ctx);
-                    return AVERROR(EIO);
-                }
-            }
-
             CFRelease(ctx->current_audio_frame);
             ctx->current_audio_frame = nil;
+
+            unlock_frames(ctx);
         } else {
             pkt->data = NULL;
             unlock_frames(ctx);
@@ -1205,6 +1121,10 @@ static int avf_close(AVFormatContext *s)
 }
 
 static const AVOption options[] = {
+    { "channels", "number of audio channels", offsetof(AVFContext, channels), AV_OPT_TYPE_INT, {.i64=2}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
+    { "sample_rate", "audio sample rate", offsetof(AVFContext, sample_rate), AV_OPT_TYPE_INT, {.i64=44100}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
+    { "big_endian", "return big endian samples for audio data", offsetof(AVFContext, big_endian), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
+    { "sample_format", "audio sample format", offsetof(AVFContext, sample_format), AV_OPT_TYPE_INT, {.i64=AV_SAMPLE_FMT_S16}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "list_devices", "list available devices", offsetof(AVFContext, list_devices), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { "video_device_index", "select video device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "audio_device_index", "select audio device by index for devices with same name (starts at 0)", offsetof(AVFContext, audio_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
