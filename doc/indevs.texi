@@ -114,7 +114,7 @@ The input filename has to be given in the following syntax:
 -i "[[VIDEO]:[AUDIO]]"
 @end example
 The first entry selects the video input while the latter selects the audio input.
-The stream has to be specified by the device name or the device index as shown by the device list.
+The stream has to be specified by the device name, index or ID as shown by the device list.
 Alternatively, the video and/or audio input device can be chosen by index using the
 @option{
     -video_device_index <INDEX>
@@ -127,7 +127,9 @@ and/or
 device name or index given in the input filename.
 
 All available devices can be enumerated by using @option{-list_devices true}, listing
-all device names and corresponding indices.
+all device names, corresponding indices and IDs, when available. Device name can be 
+tricky to use when localized and device index can change when devices are plugged or unplugged. A device
+hash, when available, uniquely identifies a device and should not change over time.
 
 There are two device name aliases:
 @table @code

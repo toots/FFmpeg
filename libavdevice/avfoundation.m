@@ -39,6 +39,8 @@
 #include "libavutil/imgutils.h"
 #include "avdevice.h"
 
+#define CLEANUP_DEVICE_ID(s) [[s stringByReplacingOccurrencesOfString:@":" withString:@"."] UTF8String]
+
 static void av_log_avfoundation(void *s, int lvl, const char *str, OSStatus err) {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     av_log(s, lvl, "AVFoundation: %s, %s\n", str,
@@ -710,21 +712,23 @@ static int avf_read_header(AVFormatContext *s)
         int index = 0;
         av_log(ctx, AV_LOG_INFO, "AVFoundation video devices:\n");
         for (AVCaptureDevice *device in devices) {
-            const char *name = [[device localizedName] UTF8String];
-            index            = [devices indexOfObject:device];
-            av_log(ctx, AV_LOG_INFO, "[%d] %s\n", index, name);
+            const char *name     = [[device localizedName] UTF8String];
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            index                = [devices indexOfObject:device];
+            av_log(ctx, AV_LOG_INFO, "[%d] %s (ID: %s)\n", index, name, uniqueId);
         }
         for (AVCaptureDevice *device in devices_muxed) {
-            const char *name = [[device localizedName] UTF8String];
-            index            = [devices count] + [devices_muxed indexOfObject:device];
-            av_log(ctx, AV_LOG_INFO, "[%d] %s\n", index, name);
+            const char *name     = [[device localizedName] UTF8String];
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            index                = [devices count] + [devices_muxed indexOfObject:device];
+            av_log(ctx, AV_LOG_INFO, "[%d] %s (ID: %s)\n", index, name, uniqueId);
         }
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
         if (num_screens > 0) {
             CGDirectDisplayID screens[num_screens];
             CGGetActiveDisplayList(num_screens, screens, &num_screens);
             for (int i = 0; i < num_screens; i++) {
-                av_log(ctx, AV_LOG_INFO, "[%d] Capture screen %d\n", ctx->num_video_devices + i, i);
+                av_log(ctx, AV_LOG_INFO, "[%d] Capture screen %d (ID: AvfilterAvfoundationCaptureScreen%d)\n", ctx->num_video_devices + i, i, screens[i]);
             }
         }
 #endif
@@ -732,9 +736,10 @@ static int avf_read_header(AVFormatContext *s)
         av_log(ctx, AV_LOG_INFO, "AVFoundation audio devices:\n");
         devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
         for (AVCaptureDevice *device in devices) {
-            const char *name = [[device localizedName] UTF8String];
-            int index  = [devices indexOfObject:device];
-            av_log(ctx, AV_LOG_INFO, "[%d] %s\n", index, name);
+            const char *name     = [[device localizedName] UTF8String];
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            int index            = [devices indexOfObject:device];
+            av_log(ctx, AV_LOG_INFO, "[%d] %s (ID: %s)\n", index, name, uniqueId);
         }
          goto fail;
     }
@@ -796,14 +801,29 @@ static int avf_read_header(AVFormatContext *s)
         } else {
         // looking for video inputs
         for (AVCaptureDevice *device in devices) {
-            if (!strncmp(ctx->video_filename, [[device localizedName] UTF8String], strlen(ctx->video_filename))) {
+            const char *name = [[device localizedName] UTF8String];
+            if (!strncmp(ctx->video_filename, name, strlen(ctx->video_filename))) {
+                video_device = device;
+                break;
+            }
+
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            if (!strncmp(ctx->video_filename, uniqueId, strlen(ctx->video_filename))) {
                 video_device = device;
                 break;
             }
         }
         // looking for muxed inputs
         for (AVCaptureDevice *device in devices_muxed) {
-            if (!strncmp(ctx->video_filename, [[device localizedName] UTF8String], strlen(ctx->video_filename))) {
+            const char *name = [[device localizedName] UTF8String];
+            if (!strncmp(ctx->video_filename, name, strlen(ctx->video_filename))) {
+                video_device = device;
+                ctx->video_is_muxed = 1;
+                break;
+            }
+
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            if (!strncmp(ctx->video_filename, uniqueId, strlen(ctx->video_filename))) {
                 video_device = device;
                 ctx->video_is_muxed = 1;
                 break;
@@ -814,10 +834,23 @@ static int avf_read_header(AVFormatContext *s)
         // looking for screen inputs
         if (!video_device) {
             int idx;
+            CGDirectDisplayID screens[num_screens];
+            CGGetActiveDisplayList(num_screens, screens, &num_screens);
+            AVCaptureScreenInput* capture_screen_input = NULL;
+
             if(sscanf(ctx->video_filename, "Capture screen %d", &idx) && idx < num_screens) {
-                CGDirectDisplayID screens[num_screens];
-                CGGetActiveDisplayList(num_screens, screens, &num_screens);
-                AVCaptureScreenInput* capture_screen_input = [[[AVCaptureScreenInput alloc] initWithDisplayID:screens[idx]] autorelease];
+                capture_screen_input = [[[AVCaptureScreenInput alloc] initWithDisplayID:screens[idx]] autorelease];
+            }
+
+            if(sscanf(ctx->video_filename, "AvfilterAvfoundationCaptureScreen%d", &idx)) {
+                for (int i = 0; i < num_screens; i++) {
+                    if (screens[i] == idx) {
+                        capture_screen_input = [[[AVCaptureScreenInput alloc] initWithDisplayID:idx] autorelease];
+                    }
+                }
+            }
+
+            if (capture_screen_input) {
                 video_device = (AVCaptureDevice*) capture_screen_input;
                 ctx->video_device_index = ctx->num_video_devices + idx;
                 ctx->video_is_screen = 1;
@@ -868,7 +901,14 @@ static int avf_read_header(AVFormatContext *s)
         NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
 
         for (AVCaptureDevice *device in devices) {
-            if (!strncmp(ctx->audio_filename, [[device localizedName] UTF8String], strlen(ctx->audio_filename))) {
+            const char *name = [[device localizedName] UTF8String];
+            if (!strncmp(ctx->audio_filename, name, strlen(ctx->audio_filename))) {
+                audio_device = device;
+                break;
+            }
+
+            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+            if (!strncmp(ctx->audio_filename, uniqueId, strlen(ctx->audio_filename))) {
                 audio_device = device;
                 break;
             }
