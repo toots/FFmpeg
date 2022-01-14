@@ -27,6 +27,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#include <Availability.h>
 
 #include "libavutil/channel_layout.h"
 #include "libavutil/pixdesc.h"
@@ -698,13 +699,54 @@ static int avf_read_header(AVFormatContext *s)
     AVCaptureDevice *video_device = nil;
     AVCaptureDevice *audio_device = nil;
     // Find capture device
-    NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
-    NSArray *devices_muxed = [AVCaptureDevice devicesWithMediaType:AVMediaTypeMuxed];
+#if defined(__MAC_10_15) || (TARGET_OS_IPHONE && defined(__IPHONE_10_0))
+       AVCaptureDeviceDiscoverySession *discoverySession =
+            [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:@[
+#if TARGET_OS_IPHONE
+                                                 AVCaptureDeviceTypeBuiltInDualCamera,
+                                                 AVCaptureDeviceTypeBuiltInDualWideCamera,
+                                                 AVCaptureDeviceTypeBuiltInUltraWideCamera,
+                                                 AVCaptureDeviceTypeBuiltInTrueDepthCamera,
+                                                 AVCaptureDeviceTypeBuiltInTelephotoCamera,
+#endif
+                                                 AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                                                 AVCaptureDeviceTypeExternalUnknown
+                                             ]
+                                             mediaType:NULL
+                                             position:AVCaptureDevicePositionUnspecified];
+
+       NSMutableArray *devices       = [NSMutableArray array];
+       NSMutableArray *devices_muxed = [NSMutableArray array];
+       for (AVCaptureDevice *device in [discoverySession devices]) {
+           if ([device hasMediaType:AVMediaTypeVideo])
+               [devices addObject:device];
+           else if ([device hasMediaType:AVMediaTypeMuxed])
+               [devices_muxed addObject:device];
+       }
+#else
+       NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
+       NSArray *devices_muxed = [AVCaptureDevice devicesWithMediaType:AVMediaTypeMuxed];
+#endif
 
     ctx->num_video_devices = [devices count] + [devices_muxed count];
 
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     CGGetActiveDisplayList(0, NULL, &num_screens);
+#endif
+
+    NSArray *audio_devices;
+#if defined(__MAC_10_15) || (TARGET_OS_IPHONE && defined(__IPHONE_10_0))
+    discoverySession =
+        [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:@[
+                                             AVCaptureDeviceTypeBuiltInMicrophone,
+                                             AVCaptureDeviceTypeExternalUnknown
+                                         ]
+                                         mediaType:AVMediaTypeAudio
+                                         position:AVCaptureDevicePositionUnspecified];
+
+    audio_devices = [discoverySession devices];
+#else
+    audio_devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
 #endif
 
     // List devices if requested
@@ -734,8 +776,7 @@ static int avf_read_header(AVFormatContext *s)
 #endif
 
         av_log(ctx, AV_LOG_INFO, "AVFoundation audio devices:\n");
-        devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
-        for (AVCaptureDevice *device in devices) {
+        for (AVCaptureDevice *device in audio_devices) {
             const char *name     = [[device localizedName] UTF8String];
             const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
             int index            = [devices indexOfObject:device];
@@ -759,9 +800,12 @@ static int avf_read_header(AVFormatContext *s)
         if (ctx->video_device_index < ctx->num_video_devices) {
             if (ctx->video_device_index < [devices count]) {
                 video_device = [devices objectAtIndex:ctx->video_device_index];
-            } else {
+            } else if (ctx->video_device_index - [devices count] < [devices_muxed count]) {
                 video_device = [devices_muxed objectAtIndex:(ctx->video_device_index - [devices count])];
                 ctx->video_is_muxed = 1;
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "Invalid video device index\n");
+                goto fail;
             }
         } else if (ctx->video_device_index < ctx->num_video_devices + num_screens) {
 #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
@@ -885,9 +929,7 @@ static int avf_read_header(AVFormatContext *s)
 
     // get audio device
     if (ctx->audio_device_index >= 0) {
-        NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
-
-        if (ctx->audio_device_index >= [devices count]) {
+        if (ctx->audio_device_index >= [audio_devices count]) {
             av_log(ctx, AV_LOG_ERROR, "Invalid audio device index\n");
             goto fail;
         }
@@ -898,21 +940,19 @@ static int avf_read_header(AVFormatContext *s)
         if (!strncmp(ctx->audio_filename, "default", 7)) {
             audio_device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
         } else {
-        NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
+            for (AVCaptureDevice *device in audio_devices) {
+                const char *name = [[device localizedName] UTF8String];
+                if (!strncmp(ctx->audio_filename, name, strlen(ctx->audio_filename))) {
+                    audio_device = device;
+                    break;
+                }
 
-        for (AVCaptureDevice *device in devices) {
-            const char *name = [[device localizedName] UTF8String];
-            if (!strncmp(ctx->audio_filename, name, strlen(ctx->audio_filename))) {
-                audio_device = device;
-                break;
+                const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
+                if (!strncmp(ctx->audio_filename, uniqueId, strlen(ctx->audio_filename))) {
+                    audio_device = device;
+                    break;
+                }
             }
-
-            const char *uniqueId = CLEANUP_DEVICE_ID([device uniqueID]);
-            if (!strncmp(ctx->audio_filename, uniqueId, strlen(ctx->audio_filename))) {
-                audio_device = device;
-                break;
-            }
-        }
         }
 
         if (!audio_device) {
