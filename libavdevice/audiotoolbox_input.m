@@ -33,12 +33,18 @@
 #include "avdevice.h"
 
 typedef struct {
+    void *data;
+    int  size;
+} buffer_t;
+
+typedef struct {
     AVClass             *class;
     CMSimpleQueueRef    frames_queue;
-    AudioQueueRef       input_queue;
+    AudioUnit           audio_unit;
+    AudioStreamBasicDescription record_format;
     uint64_t            position;
-    int                 recording_buffers;
-    int                 samples_per_buffer;
+    int                 frames_queue_length;
+    int                 buffer_frame_size;
     int                 stream_index;
     int                 big_endian;
     enum AVSampleFormat sample_format;
@@ -61,16 +67,49 @@ static int check_status(void *ctx, OSStatus status, const char *msg) {
     }
 }
 
-static void input_callback(void *priv, AudioQueueRef q,
-                           AudioQueueBufferRef buffer,
-                           const AudioTimeStamp *ts,
-                           UInt32 in,
-                           const AudioStreamPacketDescription *descr) {
+static OSStatus input_callback(void *priv,
+                               AudioUnitRenderActionFlags *ioActionFlags,
+                               const AudioTimeStamp *inTimeStamp,
+                               UInt32 inBusNumber,
+                               UInt32 inNumberFrames,
+                               AudioBufferList *ioData) {
     ATContext *ctx = (ATContext *)priv;
-    OSStatus err = CMSimpleQueueEnqueue(ctx->frames_queue, buffer);
+    OSStatus err;
 
-    if (check_status(ctx, err, "CMSimpleQueueEnqueue"))
-        return;
+    AudioBuffer audio_buffer;
+    
+    audio_buffer.mNumberChannels = ctx->channels;
+    audio_buffer.mDataByteSize = inNumberFrames * ctx->record_format.mBytesPerFrame;
+
+    audio_buffer.mData = av_malloc(audio_buffer.mDataByteSize);
+    memset(audio_buffer.mData, 0, audio_buffer.mDataByteSize);
+
+    AudioBufferList bufferList;
+    bufferList.mNumberBuffers = 1;
+    bufferList.mBuffers[0] = audio_buffer;
+
+    err = AudioUnitRender(ctx->audio_unit,
+                          ioActionFlags,
+                          inTimeStamp,
+                          inBusNumber,
+                          inNumberFrames,
+                          &bufferList);
+    if (check_status(ctx, err, "AudioUnitRender")) {
+        av_freep(&audio_buffer.mData);
+        return err;
+    }
+
+    buffer_t *buffer = av_malloc(sizeof(buffer_t));
+    buffer->data = audio_buffer.mData;
+    buffer->size = audio_buffer.mDataByteSize;
+    err = CMSimpleQueueEnqueue(ctx->frames_queue, buffer);
+
+    if (err != noErr) {
+        av_log(ctx, AV_LOG_DEBUG, "Could not enqueue audio frame!\n");
+        return err;
+    }
+
+    return noErr;
 }
 
 static av_cold int atin_read_header(AVFormatContext *avctx) {
@@ -192,23 +231,21 @@ static av_cold int atin_read_header(AVFormatContext *avctx) {
            goto fail;
     }
 
-    AudioStreamBasicDescription record_format;
-    memset(&record_format, 0, sizeof(record_format));
-    record_format.mFormatID         = kAudioFormatLinearPCM;
-    record_format.mChannelsPerFrame = ctx->channels;
-    record_format.mFormatFlags      = kAudioFormatFlagIsPacked;
-    record_format.mBitsPerChannel   = av_get_bytes_per_sample(ctx->sample_format) << 3;
+    ctx->record_format.mFormatID         = kAudioFormatLinearPCM;
+    ctx->record_format.mChannelsPerFrame = ctx->channels;
+    ctx->record_format.mFormatFlags      = kAudioFormatFlagIsPacked;
+    ctx->record_format.mBitsPerChannel   = av_get_bytes_per_sample(ctx->sample_format) << 3;
 
     if (ctx->big_endian)
-        record_format.mFormatFlags |= kAudioFormatFlagIsBigEndian;
+        ctx->record_format.mFormatFlags |= kAudioFormatFlagIsBigEndian;
 
     switch (ctx->sample_format) {
         case AV_SAMPLE_FMT_S16:
         case AV_SAMPLE_FMT_S32:
-            record_format.mFormatFlags |= kAudioFormatFlagIsSignedInteger;
+            ctx->record_format.mFormatFlags |= kAudioFormatFlagIsSignedInteger;
             break;
         case AV_SAMPLE_FMT_FLT:
-            record_format.mFormatFlags |= kAudioFormatFlagIsFloat;
+            ctx->record_format.mFormatFlags |= kAudioFormatFlagIsFloat;
             break;
         default:
             av_log(ctx, AV_LOG_ERROR, "Error: invalid sample format!\n");
@@ -220,39 +257,114 @@ static av_cold int atin_read_header(AVFormatContext *avctx) {
     av_log(ctx, AV_LOG_DEBUG, "channels: %d\n", ctx->channels);
     av_log(ctx, AV_LOG_DEBUG, "Input format: %s\n", avcodec_get_name(codec_id));
 
-    data_size = sizeof(record_format);
-    err = AudioFormatGetProperty(kAudioFormatProperty_FormatInfo, 0, NULL, &data_size, &record_format); 
+    data_size = sizeof(ctx->record_format);
+    err = AudioFormatGetProperty(kAudioFormatProperty_FormatInfo, 0, NULL, &data_size, &ctx->record_format); 
     if (check_status(avctx, err, "AudioFormatGetProperty FormatInfo"))
         goto fail;
 
-    err = AudioQueueNewInput(&record_format, input_callback, ctx, NULL, NULL, 0, &ctx->input_queue);
-    if (check_status(avctx, err, "AudioQueueNewInput"))
+    AudioComponentDescription desc;
+    AudioComponent comp;
+
+    desc.componentType = kAudioUnitType_Output;
+    desc.componentSubType = kAudioUnitSubType_HALOutput;
+    desc.componentManufacturer = kAudioUnitManufacturer_Apple;
+    desc.componentFlags = 0;
+    desc.componentFlagsMask = 0;
+
+    comp = AudioComponentFindNext(NULL, &desc);
+    if (comp == NULL) {
+        av_log(ctx, AV_LOG_ERROR, "Error: AudioComponentFindNext\n");
         goto fail;
-
-    err = AudioQueueSetProperty(ctx->input_queue, kAudioQueueProperty_CurrentDevice, &selected_device_UID, sizeof(selected_device_UID));
-    if (check_status(avctx, err, "AudioQueueSetProperty CurrentDevice"))
-        goto fail;
-
-    UInt32 buffer_size = ctx->samples_per_buffer * ctx->channels * av_get_bytes_per_sample(ctx->sample_format);
-    for(i = 0; i < ctx->recording_buffers; i++) {
-        AudioQueueBufferRef buffer;
-        err = AudioQueueAllocateBuffer(ctx->input_queue, buffer_size, &buffer);
-        if (check_status(avctx, err, "AudioQueueAllocateBuffer"))
-            goto fail;
-
-        err = AudioQueueEnqueueBuffer(ctx->input_queue, buffer, 0, NULL);
-        if (check_status(avctx, err, "AudioQueueEnqueueBuffer"))
-            goto fail;
     }
 
-    err = CMSimpleQueueCreate(kCFAllocatorDefault, ctx->recording_buffers, &ctx->frames_queue);
+    err = AudioComponentInstanceNew(comp, &ctx->audio_unit);
+    if (check_status(avctx, err, "AudioComponentInstanceNew"))
+        goto fail;
+
+    UInt32 enableIO = 1;
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioOutputUnitProperty_EnableIO,
+                               kAudioUnitScope_Input,
+                               1,
+                               &enableIO,
+                               sizeof(enableIO));
+    if (check_status(avctx, err, "AudioUnitSetProperty EnableIO"))
+        goto fail;
+
+    enableIO = 0;
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                         kAudioOutputUnitProperty_EnableIO,
+                         kAudioUnitScope_Output,
+                         0,
+                         &enableIO,
+                         sizeof(enableIO));
+    if (check_status(avctx, err, "AudioUnitSetProperty EnableIO"))
+        goto fail;
+
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioOutputUnitProperty_CurrentDevice,
+                               kAudioUnitScope_Global,
+                               0,
+                               &device,
+                               sizeof(device));
+    if (check_status(avctx, err, "AudioUnitSetProperty CurrentDevice"))
+        goto fail;
+
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioUnitProperty_StreamFormat,
+                               kAudioUnitScope_Input,
+                               0,
+                               &ctx->record_format,
+                               sizeof(ctx->record_format));
+    if (check_status(avctx, err, "AudioUnitSetProperty StreamFormat"))
+        goto fail;
+
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioUnitProperty_StreamFormat,
+                               kAudioUnitScope_Output,
+                               1,
+                               &ctx->record_format,
+                               sizeof(ctx->record_format));
+    if (check_status(avctx, err, "AudioUnitSetProperty StreamFormat"))
+        goto fail;
+
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioDevicePropertyBufferFrameSize,
+                               kAudioUnitScope_Global,
+                               0,
+                               &ctx->buffer_frame_size,
+                               sizeof(ctx->buffer_frame_size));
+    if (check_status(avctx, err, "AudioUnitSetProperty BufferFrameSize"))
+        goto fail;
+
+    AURenderCallbackStruct callback = {0};
+    callback.inputProc = input_callback;
+    callback.inputProcRefCon = ctx;
+    err = AudioUnitSetProperty(ctx->audio_unit,
+                               kAudioOutputUnitProperty_SetInputCallback,
+                               kAudioUnitScope_Global,
+                               0,
+                               &callback,
+                               sizeof(callback));
+    if (check_status(avctx, err, "AudioUnitSetProperty SetInputCallback"))
+        goto fail;
+
+    err = AudioUnitInitialize(ctx->audio_unit);
+    if (check_status(avctx, err, "AudioUnitInitialize"))
+        goto fail;
+
+    err = CMSimpleQueueCreate(kCFAllocatorDefault, ctx->frames_queue_length, &ctx->frames_queue);
     if (check_status(avctx, err, "CMSimpleQueueCreate"))
         goto fail;
 
     CFRetain(ctx->frames_queue);
 
-    err = AudioQueueStart(ctx->input_queue, NULL);
-    if (check_status(avctx, err, "AudioQueueStart"))
+    err = AudioUnitInitialize(ctx->audio_unit);
+    if (check_status(avctx, err, "AudioUnitInitialize"))
+        goto fail;
+
+    err = AudioOutputUnitStart(ctx->audio_unit);
+    if (check_status(avctx, err, "AudioOutputUnitStart"))
         goto fail;
 
     AVStream* stream = avformat_new_stream(avctx, NULL);
@@ -273,7 +385,7 @@ static av_cold int atin_read_header(AVFormatContext *avctx) {
 
 fail:
     av_freep(&channel_layout);
-    return AVERROR(EIO);
+    return AVERROR(EINVAL);
 }
 
 static int atin_read_packet(AVFormatContext *avctx, AVPacket *pkt) {
@@ -282,11 +394,12 @@ static int atin_read_packet(AVFormatContext *avctx, AVPacket *pkt) {
     if (CMSimpleQueueGetCount(ctx->frames_queue) < 1)
         return AVERROR(EAGAIN);
 
-    AudioQueueBufferRef buffer = (AudioQueueBufferRef)CMSimpleQueueDequeue(ctx->frames_queue);
+    buffer_t *buffer = (buffer_t *)CMSimpleQueueDequeue(ctx->frames_queue);
 
-    int status = av_new_packet(pkt, buffer->mAudioDataByteSize);
+    int status = av_packet_from_data(pkt, buffer->data, buffer->size);
     if (status < 0) {
-        AudioQueueEnqueueBuffer(ctx->input_queue, buffer, 0, NULL);
+        av_freep(&buffer->data);
+        av_freep(&buffer);
         return status;
     }
 
@@ -294,23 +407,30 @@ static int atin_read_packet(AVFormatContext *avctx, AVPacket *pkt) {
     pkt->flags       |= AV_PKT_FLAG_KEY;
     pkt->pts = pkt->dts = ctx->position;
 
-    ctx->position += buffer->mAudioDataByteSize / (ctx->channels * av_get_bytes_per_sample(ctx->sample_format));
+    ctx->position += pkt->size / (ctx->channels * av_get_bytes_per_sample(ctx->sample_format));
 
-    memcpy(pkt->data, buffer->mAudioData, buffer->mAudioDataByteSize);
-    AudioQueueEnqueueBuffer(ctx->input_queue, buffer, 0, NULL);
-
+    av_freep(&buffer);
     return 0;
 }
 
 static av_cold int atin_close(AVFormatContext *avctx) {
     ATContext *ctx = (ATContext*)avctx->priv_data;
 
-    if (ctx->input_queue) {
-        AudioQueueDispose(ctx->input_queue, true);
-        ctx->input_queue = NULL;
+    if (ctx->audio_unit) {
+        AudioOutputUnitStop(ctx->audio_unit);
+        AudioComponentInstanceDispose(ctx->audio_unit);
+        ctx->audio_unit = NULL;
     }
 
     if (ctx->frames_queue) {
+        buffer_t *buffer = (buffer_t *)CMSimpleQueueDequeue(ctx->frames_queue);
+
+        while (buffer) {
+          av_freep(&buffer->data);
+          av_freep(&buffer);
+          buffer = (buffer_t *)CMSimpleQueueDequeue(ctx->frames_queue);
+        }
+
         CFRelease(ctx->frames_queue);
         ctx->frames_queue = NULL;
     }
@@ -320,8 +440,8 @@ static av_cold int atin_close(AVFormatContext *avctx) {
 
 static const AVOption options[] = {
     { "channels", "number of audio channels", offsetof(ATContext, channels), AV_OPT_TYPE_INT, {.i64=0}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
-    { "recording_buffers", "number of recording buffers in the input queue", offsetof(ATContext, recording_buffers), AV_OPT_TYPE_INT, {.i64=3}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
-    { "samples_per_buffer", "size, in samples, of each input buffer in the queue", offsetof(ATContext, samples_per_buffer), AV_OPT_TYPE_INT, {.i64=2048}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
+    { "frames_queue_length", "maximum of buffers in the input queue", offsetof(ATContext, frames_queue_length), AV_OPT_TYPE_INT, {.i64=10}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
+    { "buffer_frame_size", "buffer frame size, gouverning internal latency", offsetof(ATContext, buffer_frame_size), AV_OPT_TYPE_INT, {.i64=1024}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "big_endian", "return big endian samples", offsetof(ATContext, big_endian), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "sample_format", "sample format", offsetof(ATContext, sample_format), AV_OPT_TYPE_INT, {.i64=AV_SAMPLE_FMT_S16}, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "list_devices", "list available audio devices", offsetof(ATContext, list_devices), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
