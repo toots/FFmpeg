@@ -2415,6 +2415,9 @@ static int sdp_read_header(AVFormatContext *s)
 
         if (!(rt->rtsp_flags & RTSP_FLAG_CUSTOM_IO)) {
             AVDictionary *opts = map_to_opts(rt);
+            char buf[MAX_URL_SIZE];
+            const char *p;
+            char *fec = NULL;
 
             err = getnameinfo((struct sockaddr*) &rtsp_st->sdp_ip,
                               sizeof(rtsp_st->sdp_ip),
@@ -2425,12 +2428,20 @@ static int sdp_read_header(AVFormatContext *s)
                 av_dict_free(&opts);
                 goto fail;
             }
+
+            p = strchr(s->url, '?');
+            if (p) {
+                if (av_find_info_tag(buf, sizeof(buf), "fec", p))
+                    fec = buf;
+            }
+
             ff_url_join(url, sizeof(url), "rtp", NULL,
                         namebuf, rtsp_st->sdp_port,
-                        "?localport=%d&ttl=%d&connect=%d&write_to_source=%d",
+                        "?localport=%d&ttl=%d&connect=%d&write_to_source=%d%s%s",
                         rtsp_st->sdp_port, rtsp_st->sdp_ttl,
                         rt->rtsp_flags & RTSP_FLAG_FILTER_SRC ? 1 : 0,
-                        rt->rtsp_flags & RTSP_FLAG_RTCP_TO_SOURCE ? 1 : 0);
+                        rt->rtsp_flags & RTSP_FLAG_RTCP_TO_SOURCE ? 1 : 0,
+                        fec ? "&fec=" : "", fec ? fec : "");
 
             append_source_addrs(url, sizeof(url), "sources",
                                 rtsp_st->nb_include_source_addrs,
