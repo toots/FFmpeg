@@ -755,7 +755,7 @@ Pro-MPEG Code of Practice #3 Release 2 FEC protocol.
 The Pro-MPEG CoP#3 FEC is a 2D parity-check forward error correction mechanism
 for MPEG-2 Transport Streams sent over RTP.
 
-This protocol must be used in conjunction with the @code{rtp_mpegts} muxer and
+When muxing, the protocol must be used in conjunction with the @code{rtp_mpegts} muxer and
 the @code{rtp} protocol.
 
 The required syntax is:
@@ -766,6 +766,16 @@ The required syntax is:
 The destination UDP ports are @code{port + 2} for the column FEC stream
 and @code{port + 4} for the row FEC stream.
 
+When demuxing, the protocol must specified in the @code{rtp} url parameters:
+@example
+rtp://@var{hostname}:@var{port}?fec=prompeg=@var{option}=@var{val}...
+@end example
+
+Demuxing will fail if the RTP packets are not of fixed size or if their sequence
+number requires more than two bytes.
+
+Please note that, at this time, prompeg demuxing is considered experimental.
+
 This protocol accepts the following options:
 @table @option
 
@@ -774,6 +784,15 @@ The number of columns (4-20, LxD <= 100)
 
 @item d=@var{n}
 The number of rows (4-20, LxD <= 100)
+
+@item min_decoder_packets=@var{n}
+Demuxing only: the number of packets to receive before decoding of the stream can begin.
+
+@item max_decoder_packets=@var{n}
+Demuxing only: the maximum number of packets to buffer before a missing packet is dropped.
+
+@item max_decoder_fec_packets=@var{n}
+Demuxing only: the maximum number of FEC packets to buffer before dropping new packets.
 
 @end table
 
