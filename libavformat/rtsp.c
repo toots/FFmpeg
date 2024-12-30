@@ -2391,6 +2391,7 @@ static int sdp_read_header(AVFormatContext *s)
     RTSPStream *rtsp_st;
     int i, err;
     char url[MAX_URL_SIZE];
+    char params[MAX_URL_SIZE];
     AVBPrint bp;
 
     if (!ff_network_init())
@@ -2432,12 +2433,18 @@ static int sdp_read_header(AVFormatContext *s)
                 av_dict_free(&opts);
                 goto fail;
             }
+
+            av_url_split(NULL, 0, NULL, 0, NULL, 0, NULL, params, MAX_URL_SIZE, s->url);
+            if (params[0] != '\0' && params[0] == '?')
+                params[0] = '&';
+
             ff_url_join(url, sizeof(url), "rtp", NULL,
                         namebuf, rtsp_st->sdp_port,
-                        "?localport=%d&ttl=%d&connect=%d&write_to_source=%d",
+                        "?localport=%d&ttl=%d&connect=%d&write_to_source=%d%s",
                         rtsp_st->sdp_port, rtsp_st->sdp_ttl,
                         rt->rtsp_flags & RTSP_FLAG_FILTER_SRC ? 1 : 0,
-                        rt->rtsp_flags & RTSP_FLAG_RTCP_TO_SOURCE ? 1 : 0);
+                        rt->rtsp_flags & RTSP_FLAG_RTCP_TO_SOURCE ? 1 : 0,
+                        params);
 
             p = strchr(s->url, '?');
             if (p && av_find_info_tag(buf, sizeof(buf), "localaddr", p))
