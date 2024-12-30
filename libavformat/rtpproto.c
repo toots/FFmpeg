@@ -29,6 +29,7 @@
 #include "libavutil/opt.h"
 #include "avformat.h"
 #include "avio_internal.h"
+#include "prompeg.h"
 #include "rtp.h"
 #include "rtpproto.h"
 #include "url.h"
@@ -207,6 +208,7 @@ static void build_udp_url(RTPContext *s,
  *         'block=ip[,ip]'    : list disallowed source IP addresses
  *         'write_to_source=0/1' : send packets to the source address of the latest received packet
  *         'dscp=n'           : set DSCP value to n (QoS)
+ *         'fec=s'            : FEC decoder parameters
  * deprecated option:
  *         'localport=n'      : set the local port to n
  *
@@ -279,6 +281,12 @@ static int rtp_open(URLContext *h, const char *uri, int flags)
             ff_ip_parse_blocks(h, s->block, &s->filters);
             block = s->block;
         }
+        if (av_find_info_tag(buf, sizeof(buf), "fec", p)) {
+            av_freep(&s->fec_options_str);
+            s->fec_options_str = av_strdup(buf);
+            if (!s->fec_options_str)
+                goto fail;
+        }
     }
 
     if (s->fec_options_str) {
@@ -342,6 +350,9 @@ static int rtp_open(URLContext *h, const char *uri, int flags)
 
     s->fec_hd = NULL;
     if (fec_protocol) {
+        if (h->flags & AVIO_FLAG_READ)
+            flags |= AVIO_FLAG_NONBLOCK;
+
         ff_url_join(buf, sizeof(buf), fec_protocol, NULL, hostname, rtp_port, NULL);
         if (ffurl_open_whitelist(&s->fec_hd, buf, flags, &h->interrupt_callback,
                              &fec_opts, h->protocol_whitelist, h->protocol_blacklist, h) < 0)
@@ -373,11 +384,17 @@ static int rtp_open(URLContext *h, const char *uri, int flags)
 static int rtp_read(URLContext *h, uint8_t *buf, int size)
 {
     RTPContext *s = h->priv_data;
-    int len, n, i;
+    int len, ret, n, i;
     struct pollfd p[2] = {{s->rtp_fd, POLLIN, 0}, {s->rtcp_fd, POLLIN, 0}};
     int poll_delay = h->flags & AVIO_FLAG_NONBLOCK ? 0 : 100;
     struct sockaddr_storage *addrs[2] = { &s->last_rtp_source, &s->last_rtcp_source };
     socklen_t *addr_lens[2] = { &s->last_rtp_source_len, &s->last_rtcp_source_len };
+
+    if (s->fec_hd) {
+        ret = ffurl_read(s->fec_hd, buf, size);
+	if (ret != AVERROR(EAGAIN))
+            return ret;
+    }
 
     for(;;) {
         if (ff_check_interrupt(&h->interrupt_callback))
@@ -389,16 +406,28 @@ static int rtp_read(URLContext *h, uint8_t *buf, int size)
                 if (!(p[i].revents & POLLIN))
                     continue;
                 *addr_lens[i] = sizeof(*addrs[i]);
+
                 len = recvfrom(p[i].fd, buf, size, 0,
                                 (struct sockaddr *)addrs[i], addr_lens[i]);
+
                 if (len < 0) {
                     if (ff_neterrno() == AVERROR(EAGAIN) ||
                         ff_neterrno() == AVERROR(EINTR))
                         continue;
                     return AVERROR(EIO);
                 }
+
                 if (ff_ip_check_source_lists(addrs[i], &s->filters))
                     continue;
+
+                if (s->fec_hd) {
+                    ret = ff_prompeg_add_packet(s->fec_hd, buf, len);
+                    if (ret < 0)
+                        return ret;
+
+                    len = ffurl_read(s->fec_hd, buf, len);
+                }
+
                 return len;
             }
         } else if (n < 0) {
