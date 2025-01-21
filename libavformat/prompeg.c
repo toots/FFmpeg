@@ -25,78 +25,16 @@
  * @author Vlad Tarca <vlad.tarca@gmail.com>
  */
 
-/*
- * Reminder:
-
- [RFC 2733] FEC Packet Structure
-
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                         RTP Header                            |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                         FEC Header                            |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                         FEC Payload                           |
-   |                                                               |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-
- [RFC 3550] RTP header
-
-    0                   1                   2                   3
-    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |V=2|P|X|  CC   |M|     PT      |       sequence number         |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                           timestamp                           |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |           synchronization source (SSRC) identifier            |
-   +=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+
-   |            contributing source (CSRC) identifiers             |
-   |                             ....                              |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
- [RFC 3550] RTP header extension (after CSRC)
-
-    0                   1                   2                   3
-    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |      defined by profile       |           length              |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                        header extension                       |
-   |                             ....                              |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
- [Pro-MPEG COP3] FEC Header
-
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |      SNBase low bits          |        length recovery        |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |E| PT recovery |                 mask                          |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                          TS recovery                          |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |X|D|type |index|    offset     |      NA       |SNBase ext bits|
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
- */
-
+#include "libavformat/network.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/random_seed.h"
 #include "avformat.h"
+#include "prompeg_utils.h"
+#include "prompegdec.h"
+#include "prompeg.h"
 #include "config.h"
-#include "url.h"
-
-#define PROMPEG_RTP_PT 0x60
-#define PROMPEG_FEC_COL 0x0
-#define PROMPEG_FEC_ROW 0x1
-
-typedef struct PrompegFec {
-    uint16_t sn;
-    uint32_t ts;
-    uint8_t *bitstring;
-} PrompegFec;
 
 typedef struct PrompegContext {
     const AVClass *class;
@@ -114,6 +52,12 @@ typedef struct PrompegContext {
     int rtp_buf_size;
     int init;
     int first;
+
+    // Decoder only
+    PrompegDecoder *decoder;
+    int min_decoder_packets;
+    int max_decoder_packets;
+    int max_decoder_fec_packets;
 } PrompegContext;
 
 #define OFFSET(x) offsetof(PrompegContext, x)
@@ -123,6 +67,9 @@ static const AVOption options[] = {
     { "ttl",   "Time to live (in milliseconds, multicast only)", OFFSET(ttl), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, .flags = E },
     { "l", "FEC L", OFFSET(l), AV_OPT_TYPE_INT, { .i64 =  5 }, 4, 20, .flags = E },
     { "d", "FEC D", OFFSET(d), AV_OPT_TYPE_INT, { .i64 =  5 }, 4, 20, .flags = E },
+    { "min_decoder_packets", "Min decoder packets", OFFSET(min_decoder_packets), AV_OPT_TYPE_INT, { .i64 =  8 }, 0, INT_MAX, .flags = E },
+    { "max_decoder_packets", "Max decoder packets", OFFSET(max_decoder_packets), AV_OPT_TYPE_INT, { .i64 =  50 }, 0, INT_MAX, .flags = E },
+    { "max_decoder_fec_packets", "Max decoder FEC packets", OFFSET(max_decoder_fec_packets), AV_OPT_TYPE_INT, { .i64 =  60 }, 0, INT_MAX, .flags = E },
     { NULL }
 };
 
@@ -133,50 +80,9 @@ static const AVClass prompeg_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-static void xor_fast(const uint8_t *in1, const uint8_t *in2, uint8_t *out, int size) {
-    int i, n, s;
-
-#if HAVE_FAST_64BIT
-    uint64_t v1, v2;
-
-    n = size / sizeof (uint64_t);
-    s = n * sizeof (uint64_t);
-
-    for (i = 0; i < n; i++) {
-        v1 = AV_RN64A(in1);
-        v2 = AV_RN64A(in2);
-        AV_WN64A(out, v1 ^ v2);
-        in1 += 8;
-        in2 += 8;
-        out += 8;
-    }
-#else
-    uint32_t v1, v2;
-
-    n = size / sizeof (uint32_t);
-    s = n * sizeof (uint32_t);
-
-    for (i = 0; i < n; i++) {
-        v1 = AV_RN32A(in1);
-        v2 = AV_RN32A(in2);
-        AV_WN32A(out, v1 ^ v2);
-        in1 += 4;
-        in2 += 4;
-        out += 4;
-    }
-#endif
-
-    n = size - s;
-
-    for (i = 0; i < n; i++) {
-        out[i] = in1[i] ^ in2[i];
-    }
-}
-
 static int prompeg_create_bitstring(URLContext *h, const uint8_t *buf, int size,
         uint8_t **bitstring) {
     PrompegContext *s = h->priv_data;
-    uint8_t *b;
 
     if (size < 12 || (buf[0] & 0xc0) != 0x80 || (buf[1] & 0x7f) != 0x21) {
         av_log(h, AV_LOG_ERROR, "Unsupported stream format (expected MPEG-TS over RTP)\n");
@@ -192,24 +98,8 @@ static int prompeg_create_bitstring(URLContext *h, const uint8_t *buf, int size,
         av_log(h, AV_LOG_ERROR, "Failed to allocate the bitstring buffer\n");
         return AVERROR(ENOMEM);
     }
-    b = *bitstring;
 
-    // P, X, CC
-    b[0] = buf[0] & 0x3f;
-    // M, PT
-    b[1] = buf[1];
-    // Timestamp
-    b[2] = buf[4];
-    b[3] = buf[5];
-    b[4] = buf[6];
-    b[5] = buf[7];
-    /*
-     * length_recovery: the unsigned network-ordered sum of lengths of CSRC,
-     * padding, extension and media payload
-     */
-    AV_WB16(b + 6, s->length_recovery);
-    // Payload
-    memcpy(b + 8, buf + 12, s->length_recovery);
+    ff_prompeg_pack_bitstring(*bitstring, buf, size);
 
     return 0;
 }
@@ -218,48 +108,12 @@ static int prompeg_write_fec(URLContext *h, PrompegFec *fec, uint8_t type) {
     PrompegContext *s = h->priv_data;
     URLContext *hd;
     uint8_t *buf = s->rtp_buf; // zero-filled
-    uint8_t *b = fec->bitstring;
     uint16_t sn;
     int ret;
 
     sn = type == PROMPEG_FEC_COL ? ++s->rtp_col_sn : ++s->rtp_row_sn;
 
-    // V, P, X, CC
-    buf[0] = 0x80 | (b[0] & 0x3f);
-    // M, PT
-    buf[1] = (b[1] & 0x80) | PROMPEG_RTP_PT;
-    // SN
-    AV_WB16(buf + 2, sn);
-    // TS
-    AV_WB32(buf + 4, fec->ts);
-    // CSRC=0
-    //AV_WB32(buf + 8, 0);
-    // SNBase low bits
-    AV_WB16(buf + 12, fec->sn);
-    // Length recovery
-    buf[14] = b[6];
-    buf[15] = b[7];
-    // E=1, PT recovery
-    buf[16] = 0x80 | b[1];
-    // Mask=0
-    //buf[17] = 0x0;
-    //buf[18] = 0x0;
-    //buf[19] = 0x0;
-    // TS recovery
-    buf[20] = b[2];
-    buf[21] = b[3];
-    buf[22] = b[4];
-    buf[23] = b[5];
-    // X=0, D, type=0, index=0
-    buf[24] = type == PROMPEG_FEC_COL ? 0x0 : 0x40;
-    // offset
-    buf[25] = type == PROMPEG_FEC_COL ? s->l : 0x1;
-    // NA
-    buf[26] = type == PROMPEG_FEC_COL ? s->d : s->l;
-    // SNBase ext bits=0
-    //buf[27] = 0x0;
-    // Payload
-    memcpy(buf + 28, b + 8, s->length_recovery);
+    ff_prompeg_pack_fec_packet(buf, fec, sn, type, s->l, s->d, s->rtp_buf_size);
 
     hd = type == PROMPEG_FEC_COL ? s->fec_col_hd : s->fec_row_hd;
     ret = ffurl_write(hd, buf, s->rtp_buf_size);
@@ -292,6 +146,9 @@ static int prompeg_open(URLContext *h, const char *uri, int flags) {
     if (s->ttl > 0) {
         av_dict_set_int(&udp_opts, "ttl", s->ttl, 0);
     }
+
+    if (h->flags & AVIO_FLAG_READ)
+        flags |= AVIO_FLAG_NONBLOCK;
 
     ff_url_join(buf, sizeof (buf), "udp", NULL, hostname, rtp_port + 2, NULL);
     if (ffurl_open_whitelist(&s->fec_col_hd, buf, flags, &h->interrupt_callback,
@@ -381,6 +238,30 @@ fail:
     return AVERROR(ENOMEM);
 }
 
+int ff_prompeg_add_packet(URLContext *h, const uint8_t *buf, int size) {
+    PrompegContext *s = h->priv_data;
+    int ret;
+
+    if (s->init) {
+        ret = prompeg_init(h, buf, size);
+        if (ret < 0)
+            return ret;
+
+        h->flags |= AVIO_FLAG_NONBLOCK;
+
+        s->decoder = ff_prompegdec_alloc_decoder(h, s->l, s->d,
+            s->packet_size, s->rtp_buf_size, s->bitstring_size,
+            s->min_decoder_packets, s->max_decoder_packets,
+            s->max_decoder_fec_packets);
+
+        if (!s->decoder)
+            return AVERROR(ENOMEM);
+    }
+
+    av_log(h, AV_LOG_DEBUG, "Packet add, index: %d\n", AV_RB16(buf + 2));
+    return ff_prompegdec_add_packet(s->decoder, PROMPEGDEC_PACKET, AV_RB16(buf + 2), buf, size);
+}
+
 static int prompeg_write(URLContext *h, const uint8_t *buf, int size) {
     PrompegContext *s = h->priv_data;
     PrompegFec *fec_tmp;
@@ -407,7 +288,7 @@ static int prompeg_write(URLContext *h, const uint8_t *buf, int size) {
         s->fec_row->sn = AV_RB16(buf + 2);
         s->fec_row->ts = AV_RB32(buf + 4);
     } else {
-        xor_fast(s->fec_row->bitstring, bitstring, s->fec_row->bitstring,
+        ff_prompeg_xor_fast(s->fec_row->bitstring, bitstring, s->fec_row->bitstring,
                 s->bitstring_size);
     }
 
@@ -423,7 +304,7 @@ static int prompeg_write(URLContext *h, const uint8_t *buf, int size) {
         s->fec_col_tmp[col_idx]->sn = AV_RB16(buf + 2);
         s->fec_col_tmp[col_idx]->ts = AV_RB32(buf + 4);
     } else {
-        xor_fast(s->fec_col_tmp[col_idx]->bitstring, bitstring,
+        ff_prompeg_xor_fast(s->fec_col_tmp[col_idx]->bitstring, bitstring,
                 s->fec_col_tmp[col_idx]->bitstring, s->bitstring_size);
     }
 
@@ -447,6 +328,69 @@ end:
     return ret;
 }
 
+static int prompeg_read_fec_packets(URLContext *h)
+{
+    PrompegContext *s = h->priv_data;
+    int i, ret;
+    PrompegDecoderPacketType packet_type;
+    URLContext *url_context;
+
+    if (ff_check_interrupt(&h->interrupt_callback))
+        return AVERROR_EXIT;
+
+    for (i = 0; i < 2; i++) {
+        url_context = i == 0 ? s->fec_row_hd : s->fec_col_hd;
+        packet_type = i == 0
+            ? PROMPEGDEC_FEC_ROW_PACKET
+            : PROMPEGDEC_FEC_COL_PACKET;
+
+        for (;;) {
+            ret = ffurl_read(url_context, s->rtp_buf, s->rtp_buf_size);
+            av_log(h, AV_LOG_DEBUG, "FEC %s read %d\n",
+                i == 0 ? "row" : "col", ret);
+
+            if (ret == AVERROR(EAGAIN))
+                break;
+
+            if (ret < 0)
+                return ret;
+
+            if (ret != s->rtp_buf_size)
+                return AVERROR(EINVAL); 
+
+            av_log(h, AV_LOG_DEBUG, "FEC packet add: type: %s, index: %d\n",
+                    packet_type == PROMPEGDEC_FEC_ROW_PACKET ? "row" : "col",
+                    AV_RB16(s->rtp_buf + 12));
+
+            ret = ff_prompegdec_add_packet(s->decoder, packet_type,
+                    AV_RB16(s->rtp_buf + 12), s->rtp_buf, s->rtp_buf_size);
+
+            if (ret < 0)
+                return ret;
+        }
+    }
+
+    return 0;
+}
+
+static int prompeg_read(URLContext *h, uint8_t *buf, int size)
+{
+    PrompegContext *s = h->priv_data;
+    int ret;
+
+    if (s->init)
+        return AVERROR(EAGAIN);
+
+    prompeg_read_fec_packets(h);
+
+    ret = ff_prompegdec_read_packet(s->decoder, buf, size);
+
+    if (4 < ret)
+        av_log(h, AV_LOG_DEBUG, "Got packet %d from FEC decoder\n", AV_RB16(buf + 2));
+
+    return ret;
+}
+
 static int prompeg_close(URLContext *h) {
     PrompegContext *s = h->priv_data;
     int i;
@@ -463,6 +407,8 @@ static int prompeg_close(URLContext *h) {
     }
     av_freep(&s->rtp_buf);
 
+    ff_prompegdec_free_decoder(s->decoder);
+
     return 0;
 }
 
@@ -470,8 +416,9 @@ const URLProtocol ff_prompeg_protocol = {
     .name                      = "prompeg",
     .url_open                  = prompeg_open,
     .url_write                 = prompeg_write,
+    .url_read                  = prompeg_read,
     .url_close                 = prompeg_close,
     .priv_data_size            = sizeof(PrompegContext),
-    .flags                     = URL_PROTOCOL_FLAG_NETWORK,
+    .flags                     = URL_PROTOCOL_FLAG_NETWORK | AVFMT_EXPERIMENTAL,
     .priv_data_class           = &prompeg_class,
 };
