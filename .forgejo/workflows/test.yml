@@ -1,0 +1,13 @@
+on:
+  push:
+    branches:
+      - master
+  pull_requests:
+
+jobs:
+  run_fate:
+    runs-on: linux-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./configure && make -j$(nproc)
