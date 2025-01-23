@@ -7,8 +7,6 @@ on:
 jobs:
   run_fate:
     runs-on: linux-amd64
-    container:
-      image: 'image/Dockerfile'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
