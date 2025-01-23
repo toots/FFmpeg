@@ -7,6 +7,8 @@ on:
 jobs:
   run_fate:
     runs-on: linux-amd64
+    container:
+      image: ghcr.io/btbn/ffmpeg-builds/linux64-gpl:latest
     steps:
       - uses: actions/checkout@v4
       - name: Build
