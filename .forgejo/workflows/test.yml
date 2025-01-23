@@ -4,13 +4,11 @@ on:
       - master
   pull_requests:
 
-runs:
-  using: 'docker'
-  image: 'image/Dockerfile'
-
 jobs:
   run_fate:
     runs-on: linux-amd64
+    container:
+      image: 'image/Dockerfile'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
