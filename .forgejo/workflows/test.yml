@@ -12,9 +12,6 @@ jobs:
   run_fate:
     runs-on: linux-amd64
     steps:
-      - name: Get Date
-        id: get-date
-        run: echo "date=$(date -u "+%Y%m%d")" >> $GITHUB_OUTPUT
       - name: Checkout
         uses: actions/checkout@v4
       - name: Configure
@@ -29,11 +26,14 @@ jobs:
           restore-keys: |
             fate-suite-
       - name: Sync Fate-Suite
-        run: make fate-rsync SAMPLES=$PWD/fate-suite
+        id: fate
+        run: |
+          make fate-rsync SAMPLES=$PWD/fate-suite
+          echo "hash=$(find fate-suite -type f | sha256sum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
       - name: Cache Fate-Suite
         uses: actions/cache/save@v4
         with:
           path: fate-suite
-          key: fate-suite-${{ hashFiles('fate-suite/**') }}
+          key: fate-suite-${{ steps.fate.outputs.hash }}
       - name: Run Fate
         run: make fate SAMPLES=$PWD/fate-suite -j$(nproc)
