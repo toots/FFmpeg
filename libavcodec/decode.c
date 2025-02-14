@@ -39,6 +39,7 @@
 #include "libavutil/mastering_display_metadata.h"
 #include "libavutil/mem.h"
 #include "libavutil/stereo3d.h"
+#include "libavutil/tree.h"
 
 #include "avcodec.h"
 #include "avcodec_internal.h"
@@ -97,7 +98,113 @@ typedef struct DecodeContext {
     int lcevc_frame;
     int width;
     int height;
+
+    struct AVTreeNode *pending_metadata;
 } DecodeContext;
+
+typedef struct PendingMetadata {
+    int64_t pts;
+    uint8_t *data;
+    size_t size;
+} PendingMetadata;
+
+static int compare_pending_metadata(const void *left, const void *right)
+{
+    PendingMetadata *left_packet = (PendingMetadata *)left;
+    PendingMetadata *right_packet = (PendingMetadata *)right;
+
+    if (left_packet->pts == right_packet->pts)
+        return 0;
+    if (left_packet->pts < right_packet->pts)
+        return -1;
+    return 1;
+}
+
+static int insert_pending_metadata(struct AVTreeNode **pending_metadata,
+                                   int64_t pts, const uint8_t *data,
+                                   size_t size)
+{
+    struct AVTreeNode *next = NULL;
+    PendingMetadata *pending = NULL;
+    PendingMetadata *ret;
+
+    next = av_tree_node_alloc();
+    if (!next)
+        goto fail;
+
+    pending = av_malloc(sizeof(PendingMetadata));
+    if (!pending)
+        goto fail;
+
+    pending->pts = pts;
+    pending->data = av_malloc(size);
+    pending->size = size;
+
+    if (!pending->data)
+        goto fail;
+
+    memcpy(pending->data, data, size);
+
+    ret = av_tree_insert(pending_metadata, pending, compare_pending_metadata,
+                         &next);
+
+    // If node alrady exist, we update with the latest value.
+    if (ret && ret != pending) {
+        av_free(ret->data);
+	ret->data = pending->data;
+        ret->size = pending->size;
+        av_free(next);
+        av_free(pending);
+    }
+
+    return 0;
+
+fail:
+    if (pending && pending->data)
+        av_free(pending->data);
+    av_free(pending);
+    av_free(next);
+    return AVERROR(ENOMEM);
+}
+
+static void remove_pending_metadata(struct AVTreeNode **pending_metadata,
+                                   PendingMetadata *pending)
+{
+    struct AVTreeNode *next = NULL;
+
+    av_tree_insert(pending_metadata, pending, compare_pending_metadata,
+                   &next);
+
+    av_free(pending->data);
+    av_free(pending);
+    av_free(next);
+}
+
+static int free_pending_entry(void *opaque, void *pending)
+{
+    av_free(((PendingMetadata *)pending)->data);
+    av_free(pending);
+    return 0;
+}
+
+static void free_pending_metadata(struct AVTreeNode **pending_metadata)
+{
+    av_tree_enumerate(*pending_metadata, NULL, NULL, free_pending_entry);
+
+    av_tree_destroy(*pending_metadata);
+    *pending_metadata = NULL;
+}
+
+static PendingMetadata *find_pending_metadata(
+    struct AVTreeNode *pending_metadata, int64_t pts)
+{
+    PendingMetadata pending;
+
+    pending.pts = pts;
+
+    return av_tree_find(pending_metadata, &pending, compare_pending_metadata,
+                        NULL);
+}
 
 static DecodeContext *decode_ctx(AVCodecInternal *avci)
 {
@@ -729,6 +836,8 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
 {
     AVCodecInternal *avci = avctx->internal;
     DecodeContext     *dc = decode_ctx(avci);
+    const uint8_t *side_metadata;
+    size_t size;
     int ret;
 
     if (!avcodec_is_open(avctx) || !av_codec_is_decoder(avctx->codec))
@@ -746,6 +855,14 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
         ret = av_packet_ref(avci->buffer_pkt, avpkt);
         if (ret < 0)
             return ret;
+
+        side_metadata = av_packet_get_side_data(avpkt, AV_PKT_DATA_METADATA_UPDATE, &size);
+        if (avpkt->pts != AV_NOPTS_VALUE && side_metadata) {
+            ret = insert_pending_metadata(&dc->pending_metadata, avpkt->pts,
+                                          side_metadata, size);
+            if (ret < 0)
+                return ret;
+        }
     } else
         dc->draining_started = 1;
 
@@ -815,6 +932,8 @@ fail:
 int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     AVCodecInternal *avci = avctx->internal;
+    DecodeContext     *dc = decode_ctx(avci);
+    PendingMetadata *pending;
     int ret;
 
     if (avci->buffer_frame->buf[0]) {
@@ -884,6 +1003,17 @@ int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         }
     }
 #endif
+
+    if (frame->pts != AV_NOPTS_VALUE) {
+        pending = find_pending_metadata(dc->pending_metadata, frame->pts);
+        if (pending) {
+            ret = av_packet_unpack_dictionary(pending->data, pending->size,
+                                              &frame->metadata);
+            remove_pending_metadata(&dc->pending_metadata, pending);
+            if (ret) goto fail;
+        }
+    }
+
     return 0;
 fail:
     av_frame_unref(frame);
@@ -2320,4 +2450,5 @@ void ff_decode_internal_uninit(AVCodecContext *avctx)
     DecodeContext *dc = decode_ctx(avci);
 
     av_refstruct_unref(&dc->lcevc);
+    free_pending_metadata(&dc->pending_metadata);
 }
