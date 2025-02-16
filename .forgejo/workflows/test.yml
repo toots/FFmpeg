@@ -6,7 +6,11 @@ on:
 
 jobs:
   run_fate:
-    runs-on: linux-amd64
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [linux-amd64,linux-aarch64]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
