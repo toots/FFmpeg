@@ -35,5 +35,11 @@ jobs:
         with:
           path: fate-suite
           key: fate-suite-${{ steps.fate.outputs.hash }}
+      - name: Add extra samples
+        run: |
+          cd $PWD/fate-suite
+          curl 'https://www.dropbox.com/scl/fo/xrtrna2rxr1j354hrtymq/AGwemlxHYecBLNmQ8Fsy--4?rlkey=lzilr4m9w4gfdqygoe172vvy8&dl=1' -L -o extra-samples.zip
+          unzip extra-samples.zip || true
+          rm -f extra-samples.zip
       - name: Run Fate
         run: make fate SAMPLES=$PWD/fate-suite -j$(nproc)
