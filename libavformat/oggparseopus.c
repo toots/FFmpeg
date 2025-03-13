@@ -29,7 +29,6 @@
 
 struct oggopus_private {
     int need_comments;
-    int comments_parsed;
     unsigned pre_skip;
     int64_t cur_dts;
 };
@@ -83,16 +82,7 @@ static int opus_header(AVFormatContext *avf, int idx)
         if (os->psize < 8 || memcmp(packet, "OpusTags", 8))
             return AVERROR_INVALIDDATA;
 
-        if (!priv->comments_parsed) {
-            ff_vorbis_stream_comment(avf, st, packet + 8, os->psize - 8);
-            priv->comments_parsed = 1;
-        } else {
-            ret = ff_vorbis_update_metadata(avf, st, packet + 8, os->psize - 8);
-
-            if (ret < 0)
-                return ret;
-        }
-
+        ff_vorbis_stream_comment(avf, st, packet + 8, os->psize - 8);
         priv->need_comments--;
         return 1;
     }
@@ -134,6 +124,23 @@ static int opus_packet(AVFormatContext *avf, int idx)
     if (os->granule > (1LL << 62)) {
         av_log(avf, AV_LOG_ERROR, "Unsupported huge granule pos %"PRId64 "\n", os->granule);
         return AVERROR_INVALIDDATA;
+    }
+
+     if (os->psize > 8 && !memcmp(packet, "OpusHead", 8)) {
+        if ((ret = ff_alloc_extradata(st->codecpar, os->psize)) < 0)
+            return ret;
+
+        memcpy(st->codecpar->extradata, packet, os->psize);
+        return 1;
+    }
+
+    if (os->psize > 8 && !memcmp(packet, "OpusTags", 8)) {
+        ret = ff_vorbis_update_metadata(avf, st, packet + 8, os->psize - 8);
+
+        if (ret < 0)
+            return ret;
+
+        return 1;
     }
 
     if ((!os->lastpts || os->lastpts == AV_NOPTS_VALUE) && !(os->flags & OGG_FLAG_EOS)) {

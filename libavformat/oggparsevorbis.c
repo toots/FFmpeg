@@ -427,6 +427,7 @@ static int vorbis_packet(AVFormatContext *s, int idx)
     struct ogg_stream *os = ogg->streams + idx;
     struct oggvorbis_private *priv = os->private;
     int duration, flags = 0;
+    int skip_packet = 0;
 
     if (!priv->vp)
         return AVERROR_INVALIDDATA;
@@ -439,6 +440,7 @@ static int vorbis_packet(AVFormatContext *s, int idx)
         int seg, d;
         uint8_t *last_pkt  = os->buf + os->pstart;
         uint8_t *next_pkt  = last_pkt;
+        skip_packet = 1;
 
         av_vorbis_parse_reset(priv->vp);
         duration = 0;
@@ -514,7 +516,7 @@ static int vorbis_packet(AVFormatContext *s, int idx)
         priv->final_duration += os->pduration;
     }
 
-    return 0;
+    return skip_packet;
 }
 
 const struct ogg_codec ff_vorbis_codec = {
