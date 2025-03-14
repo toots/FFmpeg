@@ -382,7 +382,8 @@ static int vorbis_header(AVFormatContext *s, int idx)
             avpriv_set_pts_info(st, 64, 1, srate);
         }
     } else if (os->buf[os->pstart] == 3) {
-        if (vorbis_update_metadata(s, idx) >= 0 && priv->len[1] > 10) {
+        if (ff_vorbis_stream_comment(s, st, os->buf + os->pstart + 7,
+                                     os->psize - 8) >= 0 && priv->len[1] > 10) {
             unsigned new_len;
 
             int ret = ff_replaygain_export(st, st->metadata);
