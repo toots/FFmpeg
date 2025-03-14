@@ -40,6 +40,9 @@
 
 #define MAX_PAGE_SIZE 65025
 
+static int ogg_write_trailer(AVFormatContext *s);
+static void ogg_free(AVFormatContext *s);
+
 typedef struct OGGPage {
     int64_t start_granule;
     int64_t granule;
@@ -640,6 +643,23 @@ static int ogg_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     OGGStreamContext *oggstream = st->priv_data;
     int ret;
     int64_t granule;
+    const uint8_t *side_metadata;
+    size_t size;
+
+    side_metadata = av_packet_get_side_data(pkt, AV_PKT_DATA_METADATA_UPDATE, &size);
+    if (side_metadata) {
+        av_dict_free(&st->metadata);
+        ret = av_packet_unpack_dictionary(side_metadata, size, &st->metadata);
+        if (ret < 0)
+            return ret;
+
+        if (s->nb_streams == 1) {
+            ogg_write_trailer(s);
+            ogg_free(s);
+            ogg_init(s);
+            ogg_write_header(s);
+        }
+    }
 
     if (st->codecpar->codec_id == AV_CODEC_ID_THEORA) {
         int64_t pts = oggstream->vrev < 1 ? pkt->pts : pkt->pts + pkt->duration;
