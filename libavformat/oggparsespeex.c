@@ -30,6 +30,9 @@
 #include "internal.h"
 #include "oggdec.h"
 
+#define OGG_SPEEX_MAGIC      "Speex   "
+#define OGG_SPEEX_MAGIC_SIZE sizeof(OGG_SPEEX_MAGIC)-1
+
 struct speex_params {
     int packet_size;
     int final_packet_duration;
@@ -116,7 +119,33 @@ static int speex_packet(AVFormatContext *s, int idx)
     struct ogg *ogg = s->priv_data;
     struct ogg_stream *os = ogg->streams + idx;
     struct speex_params *spxp = os->private;
+    AVStream *st = s->streams[idx];
     int packet_size = spxp->packet_size;
+    int ret;
+
+    if (os->psize > OGG_SPEEX_MAGIC_SIZE &&
+        !memcmp(
+            os->buf + os->pstart,
+            OGG_SPEEX_MAGIC,
+            OGG_SPEEX_MAGIC_SIZE)) {
+        if ((ret = ff_alloc_extradata(st->codecpar, os->psize)) < 0)
+            return ret;
+
+        memcpy(st->codecpar->extradata, os->buf + os->pstart,
+               st->codecpar->extradata_size);
+
+        return 1;
+    }
+
+    // Metadata packet
+    if ((!os->lastpts || os->lastpts == AV_NOPTS_VALUE) && !(os->flags & OGG_FLAG_EOS) && (int64_t)os->granule>=0) {
+        ret = ff_vorbis_update_metadata(s, st, os->buf + os->pstart,
+                                        os->psize);
+        if (ret < 0)
+            return ret;
+
+        return 1;
+    }
 
     if (os->flags & OGG_FLAG_EOS && os->lastpts != AV_NOPTS_VALUE &&
         os->granule > 0) {
@@ -142,8 +171,8 @@ static int speex_packet(AVFormatContext *s, int idx)
 }
 
 const struct ogg_codec ff_speex_codec = {
-    .magic = "Speex   ",
-    .magicsize = 8,
+    .magic = OGG_SPEEX_MAGIC,
+    .magicsize = OGG_SPEEX_MAGIC_SIZE,
     .header = speex_header,
     .packet = speex_packet,
     .nb_header = 2,

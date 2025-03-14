@@ -1,0 +1,19 @@
+Stream ID: 0, codec name: speex, metadata: encoder=Lavc61.19.100 libspeex:title=First Stream
+Stream ID: 0, packet PTS: -349, packet DTS: -349
+Stream ID: 0, new metadata: encoder=Lavc61.19.100 libspeex:title=First Stream
+Stream ID: 0, frame PTS: -349, metadata: 
+Stream ID: 0, packet PTS: 291, packet DTS: 291
+Stream ID: 0, frame PTS: 291, metadata: 
+Stream ID: 0, packet PTS: 931, packet DTS: 931
+Stream ID: 0, frame PTS: 931, metadata: 
+Stream ID: 0, packet PTS: 1571, packet DTS: 1571
+Stream ID: 0, frame PTS: 1571, metadata: 
+Stream ID: 0, packet PTS: 1862, packet DTS: 1862
+Stream ID: 0, new metadata: encoder=Lavc61.19.100 libspeex:title=Second Stream
+Stream ID: 0, frame PTS: 1862, metadata: encoder=Lavc61.19.100 libspeex:title=Second Stream
+Stream ID: 0, packet PTS: 2502, packet DTS: 2502
+Stream ID: 0, frame PTS: 2502, metadata: 
+Stream ID: 0, packet PTS: 3142, packet DTS: 3142
+Stream ID: 0, frame PTS: 3142, metadata: 
+Stream ID: 0, packet PTS: 3782, packet DTS: 3782
+Stream ID: 0, frame PTS: 3782, metadata: 
