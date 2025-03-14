@@ -886,6 +886,9 @@ retry:
 
         os->new_metadata      = NULL;
         os->new_metadata_size = 0;
+
+        pkt->pts = pkt->dts = AV_NOPTS_VALUE;
+        os->lastpts = os->lastdts = AV_NOPTS_VALUE;
     }
 
     return psize;
