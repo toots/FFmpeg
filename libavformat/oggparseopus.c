@@ -29,6 +29,7 @@
 
 struct oggopus_private {
     int need_comments;
+    int comments_parsed;
     unsigned pre_skip;
     int64_t cur_dts;
 };
@@ -81,7 +82,17 @@ static int opus_header(AVFormatContext *avf, int idx)
     if (priv->need_comments) {
         if (os->psize < 8 || memcmp(packet, "OpusTags", 8))
             return AVERROR_INVALIDDATA;
-        ff_vorbis_stream_comment(avf, st, packet + 8, os->psize - 8);
+
+        if (!priv->comments_parsed) {
+            ff_vorbis_stream_comment(avf, st, packet + 8, os->psize - 8);
+            priv->comments_parsed = 1;
+        } else {
+            ret = ff_vorbis_update_metadata(avf, st, packet + 8, os->psize - 8);
+
+            if (ret < 0)
+                return ret;
+        }
+
         priv->need_comments--;
         return 1;
     }
