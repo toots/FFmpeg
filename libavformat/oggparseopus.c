@@ -125,6 +125,17 @@ static int opus_packet(AVFormatContext *avf, int idx)
         return AVERROR_INVALIDDATA;
     }
 
+     if (os->psize > 8 && !memcmp(packet, "OpusHead", 8)) {
+        if ((ret = ff_alloc_extradata(st->codecpar, os->psize)) < 0)
+            return ret;
+
+        memcpy(st->codecpar->extradata, packet, os->psize);
+        return 1;
+    }
+
+    if (os->psize > 8 && !memcmp(packet, "OpusTags", 8))
+        return 1;
+
     if ((!os->lastpts || os->lastpts == AV_NOPTS_VALUE) && !(os->flags & OGG_FLAG_EOS)) {
         int seg, d;
         int duration;
