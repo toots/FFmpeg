@@ -97,6 +97,8 @@ typedef struct DecodeContext {
     int lcevc_frame;
     int width;
     int height;
+
+    AVDictionary *pending_metadata;
 } DecodeContext;
 
 static DecodeContext *decode_ctx(AVCodecInternal *avci)
@@ -702,6 +704,8 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
 {
     AVCodecInternal *avci = avctx->internal;
     DecodeContext     *dc = decode_ctx(avci);
+    const uint8_t *side_metadata;
+    size_t size;
     int ret;
 
     if (!avcodec_is_open(avctx) || !av_codec_is_decoder(avctx->codec))
@@ -719,6 +723,14 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
         ret = av_packet_ref(avci->buffer_pkt, avpkt);
         if (ret < 0)
             return ret;
+
+        side_metadata = av_packet_get_side_data(avpkt, AV_PKT_DATA_METADATA_UPDATE, &size);
+        if (side_metadata) {
+            av_dict_free(&dc->pending_metadata);
+            ret = av_packet_unpack_dictionary(side_metadata, size, &dc->pending_metadata);
+            if (ret < 0)
+                return ret;
+        }
     } else
         dc->draining_started = 1;
 
@@ -788,6 +800,7 @@ fail:
 int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     AVCodecInternal *avci = avctx->internal;
+    DecodeContext     *dc = decode_ctx(avci);
     int ret;
 
     if (avci->buffer_frame->buf[0]) {
@@ -809,6 +822,11 @@ int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     }
 
     avctx->frame_num++;
+
+    if (dc->pending_metadata) {
+        av_dict_copy(&frame->metadata, dc->pending_metadata, AV_DICT_APPEND);
+        av_dict_free(&dc->pending_metadata);
+    }
 
     return 0;
 fail:
@@ -2220,4 +2238,5 @@ void ff_decode_internal_uninit(AVCodecContext *avctx)
     DecodeContext *dc = decode_ctx(avci);
 
     av_refstruct_unref(&dc->lcevc);
+    av_dict_free(&dc->pending_metadata);
 }

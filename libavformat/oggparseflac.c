@@ -79,6 +79,25 @@ flac_header (AVFormatContext * s, int idx)
 }
 
 static int
+flac_packet (AVFormatContext * s, int idx)
+{
+    struct ogg *ogg = s->priv_data;
+    struct ogg_stream *os = ogg->streams + idx;
+    AVStream *st = s->streams[idx];
+    int ret;
+
+    if (os->psize > 0 && os->buf[os->pstart] &&
+        (os->buf[os->pstart] & 0x7F) == FLAC_METADATA_TYPE_VORBIS_COMMENT) {
+        ret = ff_vorbis_update_metadata(s, st, os->buf + os->pstart + 4,
+                                        os->psize - 4);
+        if (ret < 0)
+            return ret;
+    }
+
+    return 0;
+}
+
+static int
 old_flac_header (AVFormatContext * s, int idx)
 {
     struct ogg *ogg = s->priv_data;
@@ -130,6 +149,7 @@ const struct ogg_codec ff_flac_codec = {
     .magic = "\177FLAC",
     .magicsize = 5,
     .header = flac_header,
+    .packet = flac_packet,
     .nb_header = 2,
 };
 
@@ -137,5 +157,6 @@ const struct ogg_codec ff_old_flac_codec = {
     .magic = "fLaC",
     .magicsize = 4,
     .header = old_flac_header,
+    .packet = flac_packet,
     .nb_header = 0,
 };
