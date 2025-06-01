@@ -1769,17 +1769,15 @@ static int vorbis_parse_audio_packet(vorbis_context *vc, float **floor_ptr)
 
 // Return the decoded audio packet through the standard api
 
-static int vorbis_decode_frame(AVCodecContext *avctx, AVFrame *frame,
-                               int *got_frame_ptr, AVPacket *avpkt)
+
+static int vorbis_decode_legacy_frame_headers(AVCodecContext *avctx,
+                                              AVPacket *avpkt)
 {
     const uint8_t *buf = avpkt->data;
     int buf_size       = avpkt->size;
     vorbis_context *vc = avctx->priv_data;
     GetBitContext *gb = &vc->gb;
-    float *channel_ptrs[255];
-    int i, len, ret;
-
-    ff_dlog(NULL, "packet length %d \n", buf_size);
+    int ret;
 
     if (*buf == 1 && buf_size > 7) {
         if ((ret = init_get_bits8(gb, buf + 1, buf_size - 1)) < 0)
@@ -1820,6 +1818,104 @@ static int vorbis_decode_frame(AVCodecContext *avctx, AVFrame *frame,
         }
         return buf_size;
     }
+
+    return 0;
+}
+
+static int vorbis_decode_frame_headers(AVCodecContext *avctx, AVPacket *avpkt)
+{
+    vorbis_context *vc = avctx->priv_data;
+    GetBitContext *gb = &vc->gb;
+    size_t new_extradata_size;
+    const uint8_t *new_extradata;
+    const uint8_t *header_start[3];
+    int header_len[3] = {0, 0, 0};
+    const uint8_t *header;
+    int header_size = 0;
+    const uint8_t *comment;
+    int comment_size = 0;
+    const uint8_t *setup;
+    int setup_size = 0;
+    int ret;
+
+    new_extradata = av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA,
+                                            &new_extradata_size);
+    if (!new_extradata) return 0;
+
+    ret = avpriv_split_xiph_headers(new_extradata, new_extradata_size,
+                                    30, header_start, header_len);
+    if (ret < 0)
+        return ret;
+
+    header = header_start[0];
+    header_size = header_len[0];
+
+    comment = header_start[1];
+    comment_size = header_len[1];
+
+    setup = header_start[2];
+    setup_size = header_len[2];
+
+    if (header_size > 7 && *header == 1) {
+        if ((ret = init_get_bits8(gb, header + 1, header_size - 1)) < 0)
+            return ret;
+
+        vorbis_free(vc);
+        if ((ret = vorbis_parse_id_hdr(vc))) {
+            av_log(avctx, AV_LOG_ERROR, "Id header corrupt.\n");
+            vorbis_free(vc);
+            return ret;
+        }
+
+        av_channel_layout_uninit(&avctx->ch_layout);
+        if (vc->audio_channels > 8) {
+            avctx->ch_layout.order       = AV_CHANNEL_ORDER_UNSPEC;
+            avctx->ch_layout.nb_channels = vc->audio_channels;
+        } else {
+            av_channel_layout_copy(&avctx->ch_layout, &ff_vorbis_ch_layouts[vc->audio_channels - 1]);
+        }
+
+        avctx->sample_rate = vc->audio_samplerate;
+    }
+
+    if (comment_size > 7 && *comment == 3) {
+        av_log(avctx, AV_LOG_DEBUG, "Ignoring comment header\n");
+    }
+
+    if (setup_size > 7 && *setup == 5 && vc->channel_residues && !vc->modes) {
+        if ((ret = init_get_bits8(gb, setup + 1, setup_size - 1)) < 0)
+            return ret;
+
+        if ((ret = vorbis_parse_setup_hdr(vc))) {
+            av_log(avctx, AV_LOG_ERROR, "Setup header corrupt.\n");
+            vorbis_free(vc);
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+static int vorbis_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                               int *got_frame_ptr, AVPacket *avpkt)
+{
+    const uint8_t *buf = avpkt->data;
+    int buf_size       = avpkt->size;
+    vorbis_context *vc = avctx->priv_data;
+    GetBitContext *gb = &vc->gb;
+    float *channel_ptrs[255];
+    int i, len, ret;
+
+    ff_dlog(NULL, "packet length %d \n", buf_size);
+
+    // Prior to lavf 62.4.100, headers from subsequent sequentialized
+    // ogg bitstreams were passed dow the demuxer. After that version,
+    // they are passed as extra data.
+    if (ret = vorbis_decode_frame_headers(avctx, avpkt))
+        return ret;
+
+    if (ret = vorbis_decode_legacy_frame_headers(avctx, avpkt))
+        return ret;
 
     if (!vc->channel_residues || !vc->modes) {
         av_log(avctx, AV_LOG_ERROR, "Data packet before valid headers\n");
