@@ -264,6 +264,7 @@ extern const FFFilter ff_vf_detelecine;
 extern const FFFilter ff_vf_dilation;
 extern const FFFilter ff_vf_dilation_opencl;
 extern const FFFilter ff_vf_displace;
+extern const FFFilter ff_vf_displaymatrix_autorotate;
 extern const FFFilter ff_vf_dnn_classify;
 extern const FFFilter ff_vf_dnn_detect;
 extern const FFFilter ff_vf_dnn_processing;
