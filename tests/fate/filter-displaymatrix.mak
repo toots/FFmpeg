@@ -13,6 +13,13 @@ FATE_FILTER_DISPLAYMATRIX-$(CONFIG_DISPLAYMATRIX_AUTOROTATE_FILTER) += \
     fate-filter-displaymatrix-dynamic-180-to-none \
     fate-filter-displaymatrix-dynamic-rotate-72
 
+FATE_FILTER_DISPLAYMATRIX-yes += \
+    fate-filter-displaymatrix-ffmpeg-90 \
+    fate-filter-displaymatrix-ffmpeg-180 \
+    fate-filter-displaymatrix-ffmpeg-270 \
+    fate-filter-displaymatrix-ffmpeg-hflip \
+    fate-filter-displaymatrix-ffmpeg-vflip
+
 # Test with 90° rotation matrix applied via filter option (transpose)
 fate-filter-displaymatrix-90: CMD = framecrc -lavfi testsrc2=d=0.1:r=5:s=320x240,displaymatrix_autorotate=matrix=0\|65536\|0\|-65536\|0\|0\|0\|0\|1073741824
 fate-filter-displaymatrix-90-first: CMD = framecrc -noautorotate -i $(TARGET_SAMPLES)/displaymatrix/rotate_90.mp4 -vf displaymatrix_autorotate,format=yuv420p
@@ -32,6 +39,12 @@ fate-filter-displaymatrix-dynamic-vflip-to-hflip: CMD = framecrc -noautorotate -
 fate-filter-displaymatrix-dynamic-180-to-none: CMD = framecrc -noautorotate -i $(TARGET_SAMPLES)/displaymatrix/rotate_90.mp4 -vf displaymatrix_autorotate=matrix=-65536\|0\|0\|0\|-65536\|0\|0\|0\|1073741824,format=yuv420p
 # Test dynamic reconfiguration accepted (rotate -72° -> rotate 72°, same dimensions with rotw/roth)
 fate-filter-displaymatrix-dynamic-rotate-72: CMD = framecrc -noautorotate -i $(TARGET_SAMPLES)/displaymatrix/rotate_72.mp4 -vf displaymatrix_autorotate=matrix=20251\|62328\|0\|-62328\|20251\|0\|0\|0\|1073741824:ow=rotw\(a\):oh=roth\(a\),format=yuv420p
+
+fate-filter-displaymatrix-ffmpeg-90: CMD = framecrc -i $(TARGET_SAMPLES)/displaymatrix/rotate_90.mp4 -vf format=yuv420p
+fate-filter-displaymatrix-ffmpeg-180: CMD = framecrc -i $(TARGET_SAMPLES)/displaymatrix/rotate_180.mp4 -vf format=yuv420p
+fate-filter-displaymatrix-ffmpeg-270: CMD = framecrc -i $(TARGET_SAMPLES)/displaymatrix/rotate_270.mp4 -vf format=yuv420p
+fate-filter-displaymatrix-ffmpeg-hflip: CMD = framecrc -i $(TARGET_SAMPLES)/displaymatrix/hflip.mp4 -vf format=yuv420p
+fate-filter-displaymatrix-ffmpeg-vflip: CMD = framecrc -i $(TARGET_SAMPLES)/displaymatrix/vflip.mp4 -vf format=yuv420p
 
 FATE_FILTER-yes += $(FATE_FILTER_DISPLAYMATRIX-yes)
 fate-filter-displaymatrix: $(FATE_FILTER_DISPLAYMATRIX-yes)
