@@ -1642,41 +1642,6 @@ static int configure_output_video_filter(FilterGraphPriv *fgp, AVFilterGraph *gr
             return ret;
     }
 
-    if (ofp->flags & OFILTER_FLAG_AUTOROTATE) {
-        int32_t *displaymatrix = ofp->displaymatrix;
-        double theta;
-
-        theta = get_rotation(displaymatrix);
-
-        if (fabs(theta - 90) < 1.0) {
-            ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                displaymatrix[3] > 0 ? "cclock_flip" : "clock");
-        } else if (fabs(theta - 180) < 1.0) {
-            if (displaymatrix[0] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "hflip", NULL);
-                if (ret < 0)
-                    return ret;
-            }
-            if (displaymatrix[4] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-            }
-        } else if (fabs(theta - 270) < 1.0) {
-            ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                displaymatrix[3] < 0 ? "clock_flip" : "cclock");
-        } else if (fabs(theta) > 1.0) {
-            char rotate_buf[64];
-            snprintf(rotate_buf, sizeof(rotate_buf), "%f*PI/180", theta);
-            ret = insert_filter(&last_filter, &pad_idx, "rotate", rotate_buf);
-        } else if (fabs(theta) < 1.0) {
-            if (displaymatrix && displaymatrix[4] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-            }
-        }
-        if (ret < 0)
-            return ret;
-
-        av_frame_side_data_remove(&ofp->side_data, &ofp->nb_side_data, AV_FRAME_DATA_DISPLAYMATRIX);
-    }
 
     if ((ofp->width || ofp->height) && (ofp->flags & OFILTER_FLAG_AUTOSCALE)) {
         char args[255];
@@ -1725,6 +1690,12 @@ static int configure_output_video_filter(FilterGraphPriv *fgp, AVFilterGraph *gr
 
         last_filter = filter;
         pad_idx     = 0;
+    }
+
+    if (ofp->flags & OFILTER_FLAG_AUTOROTATE) {
+        ret = insert_filter(&last_filter, &pad_idx, "displaymatrix_autorotate", NULL);
+        if (ret < 0)
+            return ret;
     }
 
     snprintf(name, sizeof(name), "trim_out_%s", ofilter->output_name);
@@ -1912,38 +1883,9 @@ static int configure_input_video_filter(FilterGraph *fg, AVFilterGraph *graph,
     ifp->displaymatrix_applied = 0;
     if ((ifp->opts.flags & IFILTER_FLAG_AUTOROTATE) &&
         !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
-        int32_t *displaymatrix = ifp->displaymatrix;
-        double theta;
-
-        theta = get_rotation(displaymatrix);
-
-        if (fabs(theta - 90) < 1.0) {
-            ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                displaymatrix[3] > 0 ? "cclock_flip" : "clock");
-        } else if (fabs(theta - 180) < 1.0) {
-            if (displaymatrix[0] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "hflip", NULL);
-                if (ret < 0)
-                    return ret;
-            }
-            if (displaymatrix[4] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-            }
-        } else if (fabs(theta - 270) < 1.0) {
-            ret = insert_filter(&last_filter, &pad_idx, "transpose",
-                                displaymatrix[3] < 0 ? "clock_flip" : "cclock");
-        } else if (fabs(theta) > 1.0) {
-            char rotate_buf[64];
-            snprintf(rotate_buf, sizeof(rotate_buf), "%f*PI/180", theta);
-            ret = insert_filter(&last_filter, &pad_idx, "rotate", rotate_buf);
-        } else if (fabs(theta) < 1.0) {
-            if (displaymatrix && displaymatrix[4] < 0) {
-                ret = insert_filter(&last_filter, &pad_idx, "vflip", NULL);
-            }
-        }
+        ret = insert_filter(&last_filter, &pad_idx, "displaymatrix_autorotate", NULL);
         if (ret < 0)
             return ret;
-
         ifp->displaymatrix_applied = 1;
     }
 
