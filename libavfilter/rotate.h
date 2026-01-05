@@ -49,6 +49,7 @@ enum var_name {
     VAR_HSUB, VAR_VSUB,
     VAR_N,
     VAR_T,
+    VAR_A,
     VAR_VARS_NB
 };
 

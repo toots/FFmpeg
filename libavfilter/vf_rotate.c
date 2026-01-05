@@ -34,6 +34,7 @@ static const char * const var_names[] = {
     "hsub", "vsub",
     "n",            ///< number of frame
     "t",            ///< timestamp expressed in seconds
+    "a",            ///< rotation angle in radians
     NULL
 };
 
@@ -251,6 +252,10 @@ int ff_rotate_config_output(AVFilterLink *outlink)
         return ret;
     }
 
+    // Set initial value for a when used for dimensions
+    rot->angle = res = av_expr_eval(rot->angle_expr, rot->var_values, rot);
+    rot->var_values[VAR_A] = rot->angle;
+
 #define SET_SIZE_EXPR(name, opt_name) do {                                         \
     ret = av_expr_parse_and_eval(&res, expr = rot->name##_expr_str,                \
                                  var_names, rot->var_values,                       \
@@ -451,6 +456,7 @@ int ff_rotate_filter_frame(AVFilterLink *inlink, AVFrame *in)
     rot->var_values[VAR_N] = inl->frame_count_out;
     rot->var_values[VAR_T] = TS2T(in->pts, inlink->time_base);
     rot->angle = res = av_expr_eval(rot->angle_expr, rot->var_values, rot);
+    rot->var_values[VAR_A] = rot->angle;
 
     av_log(ctx, AV_LOG_DEBUG, "n:%f time:%f angle:%f/PI\n",
            rot->var_values[VAR_N], rot->var_values[VAR_T], rot->angle/M_PI);
