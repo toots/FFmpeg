@@ -11939,6 +11939,67 @@ Flags to local 3x3 coordinates maps like this:
 
 This filter supports the all above options as @ref{commands}.
 
+@section displaymatrix_autorotate
+
+Automatically apply rotation and flipping transformations based on display matrix metadata.
+
+The filter detects rotation and flip information from the video stream's display matrix
+side data and applies the appropriate transformation. It delegates to @code{transpose},
+@code{hflip}, @code{vflip}, or @code{rotate} filters as needed.
+
+The filter accepts the following options:
+
+@table @option
+@item matrix
+Set the display matrix as a @samp{|}-separated list of 9 integers.
+If not specified, the filter attempts to read the display matrix from stream or frame side data.
+
+@item fillcolor, c
+Set the background fill color used for arbitrary angle rotations.
+For the syntax, check the @ref{color syntax,,"Color" section in the ffmpeg-utils manual,ffmpeg-utils}.
+Default is @samp{black}.
+
+@item out_w, ow
+Set the output width expression for arbitrary angle rotations, default is @samp{rotw(a)}.
+Only used when the display matrix specifies rotations other than 90, 180, or 270 degrees.
+
+@item out_h, oh
+Set the output height expression for arbitrary angle rotations, default is @samp{roth(a)}.
+Only used when the display matrix specifies rotations other than 90, 180, or 270 degrees.
+
+The variable @code{a} evaluates to the rotation angle in radians as specified by the display matrix.
+The @code{rotw(a)} and @code{roth(a)} functions calculate the minimum dimensions needed
+to contain the rotated frame without clipping.
+
+@item dynamic
+Enable or disable dynamic displaymatrix reconfiguration. When enabled, the filter
+reconfigures if a new display matrix is detected in frame side data, but only if
+the transformation preserves output dimensions. Dimension-changing updates are always rejected.
+Default is @samp{1} (enabled).
+@end table
+
+@subsection Examples
+
+@itemize
+@item
+Apply rotation from stream metadata:
+@example
+displaymatrix_autorotate
+@end example
+
+@item
+Override with a 90-degree rotation matrix:
+@example
+displaymatrix_autorotate=matrix=0|65536|0|-65536|0|0|0|0|1073741824
+@end example
+
+@item
+Disable dynamic reconfiguration:
+@example
+displaymatrix_autorotate=dynamic=0
+@end example
+@end itemize
+
 @section displace
 
 Displace pixels as indicated by second and third input stream.

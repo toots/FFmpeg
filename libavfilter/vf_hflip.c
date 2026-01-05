@@ -57,9 +57,9 @@ static int query_formats(const AVFilterContext *ctx,
     return ff_set_common_formats2(ctx, cfg_in, cfg_out, pix_fmts);
 }
 
-static int config_props(AVFilterLink *inlink)
+int ff_hflip_config_input(AVFilterLink *inlink)
 {
-    FlipContext *s = inlink->dst->priv;
+    HFlipContext *s = inlink->dst->priv;
     const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(inlink->format);
     const int hsub = pix_desc->log2_chroma_w;
     const int vsub = pix_desc->log2_chroma_h;
@@ -83,7 +83,7 @@ typedef struct ThreadData {
 
 static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
 {
-    FlipContext *s = ctx->priv;
+    HFlipContext *s = ctx->priv;
     ThreadData *td = arg;
     AVFrame *in = td->in;
     AVFrame *out = td->out;
@@ -111,11 +111,21 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int job, int nb_jobs)
     return 0;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+void ff_hflip_frame(AVFilterContext *ctx, AVFrame *out, const AVFrame *in)
+{
+    AVFilterLink *outlink = ctx->outputs[0];
+    ThreadData td;
+
+    td.in = (AVFrame *)in;
+    td.out = out;
+    ff_filter_execute(ctx, filter_slice, &td, NULL,
+                      FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+}
+
+int ff_hflip_filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
     AVFilterContext *ctx  = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
-    ThreadData td;
     AVFrame *out;
 
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
@@ -129,9 +139,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     if (av_pix_fmt_desc_get(inlink->format)->flags & AV_PIX_FMT_FLAG_PAL)
         memcpy(out->data[1], in->data[1], AVPALETTE_SIZE);
 
-    td.in = in, td.out = out;
-    ff_filter_execute(ctx, filter_slice, &td, NULL,
-                      FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+    ff_hflip_frame(ctx, out, in);
 
     av_frame_free(&in);
     return ff_filter_frame(outlink, out);
@@ -141,8 +149,8 @@ static const AVFilterPad avfilter_vf_hflip_inputs[] = {
     {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
-        .filter_frame = filter_frame,
-        .config_props = config_props,
+        .filter_frame = ff_hflip_filter_frame,
+        .config_props = ff_hflip_config_input,
     },
 };
 
@@ -150,7 +158,7 @@ const FFFilter ff_vf_hflip = {
     .p.name        = "hflip",
     .p.description = NULL_IF_CONFIG_SMALL("Horizontally flip the input video."),
     .p.flags       = AVFILTER_FLAG_SLICE_THREADS | AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
-    .priv_size     = sizeof(FlipContext),
+    .priv_size     = sizeof(HFlipContext),
     FILTER_INPUTS(avfilter_vf_hflip_inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_QUERY_FUNC2(query_formats),
