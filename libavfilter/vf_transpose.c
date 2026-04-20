@@ -40,18 +40,6 @@
 #include "video.h"
 #include "transpose.h"
 
-typedef struct TransContext {
-    const AVClass *class;
-    int hsub, vsub;
-    int planes;
-    int pixsteps[4];
-
-    int passthrough;    ///< PassthroughType, landscape passthrough mode enabled
-    int dir;            ///< TransposeDir
-
-    TransVtable vtables[4];
-} TransContext;
-
 static int query_formats(const AVFilterContext *ctx,
                          AVFilterFormatsConfig **cfg_in,
                          AVFilterFormatsConfig **cfg_out)
@@ -176,7 +164,7 @@ static void transpose_8x8_64_c(uint8_t *src, ptrdiff_t src_linesize,
     transpose_block_64_c(src, src_linesize, dst, dst_linesize, 8, 8);
 }
 
-static int config_props_output(AVFilterLink *outlink)
+int ff_transpose_config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
     TransContext *s = ctx->priv;
@@ -253,7 +241,7 @@ static int config_props_output(AVFilterLink *outlink)
     return 0;
 }
 
-static AVFrame *get_video_buffer(AVFilterLink *inlink, int w, int h)
+AVFrame *ff_transpose_get_video_buffer(AVFilterLink *inlink, int w, int h)
 {
     TransContext *s = inlink->dst->priv;
 
@@ -328,7 +316,7 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr,
     return 0;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+int ff_transpose_filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
     int err = 0;
     AVFilterContext *ctx = inlink->dst;
@@ -394,15 +382,15 @@ static const AVFilterPad avfilter_vf_transpose_inputs[] = {
     {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
-        .get_buffer.video = get_video_buffer,
-        .filter_frame = filter_frame,
+        .get_buffer.video = ff_transpose_get_video_buffer,
+        .filter_frame = ff_transpose_filter_frame,
     },
 };
 
 static const AVFilterPad avfilter_vf_transpose_outputs[] = {
     {
         .name         = "default",
-        .config_props = config_props_output,
+        .config_props = ff_transpose_config_output,
         .type         = AVMEDIA_TYPE_VIDEO,
     },
 };

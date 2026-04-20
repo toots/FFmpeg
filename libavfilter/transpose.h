@@ -45,6 +45,22 @@ typedef struct TransVtable {
                             int w, int h);
 } TransVtable;
 
+typedef struct TransContext {
+    const AVClass *class;
+    int hsub, vsub;
+    int planes;
+    int pixsteps[4];
+
+    int passthrough;    ///< PassthroughType, landscape passthrough mode enabled
+    int dir;            ///< TransposeDir
+
+    TransVtable vtables[4];
+} TransContext;
+
 void ff_transpose_init_x86(TransVtable *v, int pixstep);
+
+int ff_transpose_config_output(AVFilterLink *outlink);
+int ff_transpose_filter_frame(AVFilterLink *inlink, AVFrame *in);
+AVFrame *ff_transpose_get_video_buffer(AVFilterLink *inlink, int w, int h);
 
 #endif

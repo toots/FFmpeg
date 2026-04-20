@@ -28,15 +28,11 @@
 #include "avfilter.h"
 #include "filters.h"
 #include "video.h"
+#include "vflip.h"
 
-typedef struct FlipContext {
-    int vsub;   ///< vertical chroma subsampling
-    int bayer;
-} FlipContext;
-
-static int config_input(AVFilterLink *link)
+int ff_vflip_config_input(AVFilterLink *link)
 {
-    FlipContext *flip = link->dst->priv;
+    VFlipContext *flip = link->dst->priv;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
 
     flip->vsub = desc->log2_chroma_h;
@@ -45,9 +41,9 @@ static int config_input(AVFilterLink *link)
     return 0;
 }
 
-static AVFrame *get_video_buffer(AVFilterLink *link, int w, int h)
+AVFrame *ff_vflip_get_video_buffer(AVFilterLink *link, int w, int h)
 {
-    FlipContext *flip = link->dst->priv;
+    VFlipContext *flip = link->dst->priv;
     AVFrame *frame;
     int i;
 
@@ -97,23 +93,29 @@ static int flip_bayer(AVFilterLink *link, AVFrame *in)
     return ff_filter_frame(outlink, out);
 }
 
-static int filter_frame(AVFilterLink *link, AVFrame *frame)
+void ff_vflip_frame_inplace(AVFrame *frame, int vsub, int height)
 {
-    FlipContext *flip = link->dst->priv;
     int i;
+
+    for (i = 0; i < 4; i ++) {
+        int plane_vsub = i == 1 || i == 2 ? vsub : 0;
+        int plane_height = AV_CEIL_RSHIFT(height, plane_vsub);
+
+        if (frame->data[i]) {
+            frame->data[i] += (plane_height - 1) * frame->linesize[i];
+            frame->linesize[i] = -frame->linesize[i];
+        }
+    }
+}
+
+int ff_vflip_filter_frame(AVFilterLink *link, AVFrame *frame)
+{
+    VFlipContext *flip = link->dst->priv;
 
     if (flip->bayer)
         return flip_bayer(link, frame);
 
-    for (i = 0; i < 4; i ++) {
-        int vsub = i == 1 || i == 2 ? flip->vsub : 0;
-        int height = AV_CEIL_RSHIFT(link->h, vsub);
-
-        if (frame->data[i]) {
-            frame->data[i] += (height - 1) * frame->linesize[i];
-            frame->linesize[i] = -frame->linesize[i];
-        }
-    }
+    ff_vflip_frame_inplace(frame, flip->vsub, link->h);
 
     return ff_filter_frame(link->dst->outputs[0], frame);
 }
@@ -121,9 +123,9 @@ static const AVFilterPad avfilter_vf_vflip_inputs[] = {
     {
         .name             = "default",
         .type             = AVMEDIA_TYPE_VIDEO,
-        .get_buffer.video = get_video_buffer,
-        .filter_frame     = filter_frame,
-        .config_props     = config_input,
+        .get_buffer.video = ff_vflip_get_video_buffer,
+        .filter_frame     = ff_vflip_filter_frame,
+        .config_props     = ff_vflip_config_input,
     },
 };
 
@@ -131,7 +133,7 @@ const FFFilter ff_vf_vflip = {
     .p.name        = "vflip",
     .p.description = NULL_IF_CONFIG_SMALL("Flip the input video vertically."),
     .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
-    .priv_size   = sizeof(FlipContext),
+    .priv_size   = sizeof(VFlipContext),
     FILTER_INPUTS(avfilter_vf_vflip_inputs),
     FILTER_OUTPUTS(ff_video_default_filterpad),
 };
